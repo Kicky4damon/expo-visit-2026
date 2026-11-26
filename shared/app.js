@@ -469,6 +469,7 @@
     box.innerHTML = `<h2>녹음 <span class="small">${list.length ? list.length + '개' : ''}</span></h2>
       <div class="notice">🎙 녹음 전 상대방에게 녹음 사실을 알려 주세요.</div>
       <button class="btn big ${recording ? 'warn' : ''}" id="recbtn">${recording ? '■ 녹음 멈추기 ' + fmtDur(Date.now() - RS.start) : '● 녹음 시작'}</button>
+      <p class="small" style="margin:6px 2px 0">녹음을 마치고 [변환]을 누르면 30초~1분 뒤에 분석이 끝나요</p>
       <div id="reclist">${list.map(r => {
         const st = r.dirty && !r.path ? 'local' : r.status || 'uploaded'; const o = parseSummary(r.summary);
         return `<div class="rec"><div class="rhead"><b>${hhmm(new Date(r.created))} · ${fmtDur(r.duration)}</b><span class="rst rs-${st}">${REC_STATUS[st] || st}${st === 'local' && r.conv ? ' · 변환 예약' : ''}</span></div>
