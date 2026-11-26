@@ -126,8 +126,6 @@ textarea:focus,input:focus{outline:none;border-color:var(--navy2);box-shadow:0 0
 .sumt{font-weight:700;margin-top:6px}
 .sumbox ul{margin:2px 0;padding-left:18px}
 .qa{margin:4px 0;font-size:15px}
-.live{background:#fafafa;border:1px dashed #bbb;border-radius:10px;padding:8px;margin-top:8px;white-space:pre-wrap;min-height:48px;font-size:15px}
-.live i{color:#888}
 details.sub{margin-top:8px;background:#fafbfc;border:1px solid #e3e7ee;border-radius:10px;padding:6px 10px}
 details.sub summary{cursor:pointer;font-weight:700;min-height:36px;display:flex;align-items:center;gap:6px}
 .warnbox{border-color:#f3d29a;background:#fffaf0}

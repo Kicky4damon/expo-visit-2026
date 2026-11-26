@@ -57,6 +57,9 @@ with sync_playwright() as p:
         check(f'[{app}] 전화 tel: 링크', hrefs and all(re.fullmatch(r'tel:010\d{8}', h) for h in hrefs), f'{len(hrefs)}개')
         page.goto(f'{BASE}/{app}/?ns=test#list'); page.wait_for_selector('#cards')
         shot(page, f'{app}_1_list')
+        lt = page.text_content('body')
+        check(f'[{app}] 머리·바닥 안내 문구 없음(제목·저장/동기화·진행 상태는 있음)', page.query_selector('.hint') is None and not any(w in lt for w in ('자료 참고 사항', '상태 버튼을 누르면', 'ELIM-2026'))
+              and page.is_visible('h1') and page.is_visible('#net') and page.is_visible('.dash') and page.is_visible('.bar'))
         check(f'[{app}] ?ns=test 일 때 “테스트 공간” 표시·테스트 매니페스트', page.is_visible('.testns') and page.evaluate("document.getElementById('mf').getAttribute('href')") == 'manifest-test.webmanifest')
         # 상세 입력
         first = f'{app}-1' if app == 'p1' else f'{app}-A'

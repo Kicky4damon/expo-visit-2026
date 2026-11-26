@@ -12,7 +12,7 @@
   const V1_FIELDS = ['answer', 'met', 'memo', 'followup'];
   const FIELD_LABEL = { answer: '받은 답변', met: '만난 사람', memo: '자유 메모', followup: '후속 조치' };
   const STATUS = { none: '미방문', doing: '방문중', done: '완료' };
-  const REC_STATUS = { local: '보낼 준비(오프라인 저장)', uploading: '올리는 중', pending: '대기 중', processing: '처리 중', done: '완료', failed: '실패' };
+  const REC_STATUS = { local: '보낼 준비(오프라인 저장)', uploading: '올리는 중', uploaded: '변환 전', pending: '변환 대기', processing: '변환 중', done: '완료', failed: '실패' };
   const $ = (s, r = document) => r.querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const pad = n => String(n).padStart(2, '0');
@@ -234,6 +234,7 @@
     if (RECS[r.id] !== r || r.ts !== ts) return;
     if (data.ts === ts && data.by_no === r.by) { if (r.deleted) await storageDel([...(r.oldPaths || []), data.path, r.path]); r.dirty = false; await applyRec(data, true); }
     else { r.dirty = false; await applyRec(data, true); }
+    if (r.conv && !r.deleted && r.path && data.status === 'uploaded') { const q = await sb.rpc('expo_request_rec', { p_id: r.id, p_by: (ME && ME.no) || null }); if (!q.error && q.data) { r.conv = false; await applyRec(q.data, false); } }
   }
   async function pullAll() {
     for (const [table, fn] of [['expo_items', applyItem], ['expo_photos', applyPhoto], ['expo_recordings', applyRec]]) {
@@ -363,12 +364,10 @@
       <div class="cstat">적은 칸 ${filled}/${FIELDS.length} · 녹음 ${nr}</div></div>
       <div class="stcol"><button class="chk s-${st}" data-cyc="${c.id}" aria-label="방문 상태 바꾸기">${STATUS[st]}</button>${sit ? `<div class="mk">${esc(marker(sit))}</div>` : ''}</div></div></div>`;
     }).join('');
-    shell(CFG.title, null, `${upgradeBanner()}<div class="hint">${esc(DATA.headline)}</div>
+    shell(CFG.title, null, `${upgradeBanner()}
       <div class="dash"><div class="d done"><b>${cnt.done}</b>완료</div><div class="d doing"><b>${cnt.doing}</b>방문중</div><div class="d none"><b>${cnt.none}</b>미방문</div></div>
       <div class="bar"><i class="b-done" style="width:${cnt.done / cs.length * 100}%"></i><i class="b-doing" style="width:${cnt.doing / cs.length * 100}%"></i></div>
-      <div class="small" style="margin:-6px 2px 10px;text-align:right">${esc(DATA.docNo)} · 상태 버튼을 누르면 미방문 → 방문중 → 완료</div>
-      <div id="cards">${items}</div>
-      <details class="sec"><summary><b>자료 참고 사항</b></summary><ul class="small">${DATA.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul></details>`, navBar('#list'));
+      <div id="cards">${items}</div>`, navBar('#list'));
     bindUpgrade();
     document.querySelectorAll('[data-open]').forEach(el => el.onclick = () => { location.hash = '#c/' + el.dataset.open; });
     document.querySelectorAll('[data-cyc]').forEach(el => el.onclick = () => { const cid = el.dataset.cyc; const nx = { none: 'doing', doing: 'done', done: 'none' }[status(cid)]; setField(cid, 'status', nx); renderList(); });
@@ -441,7 +440,6 @@
   async function replacePhoto(id, file) { const p = PHOTOS[id]; if (!p) return; const r = await resizeImage(file); if (p.path) p.oldPaths = [...(p.oldPaths || []), p.path]; Object.assign(p, { blob: r.blob, w: r.w, h: r.h, path: null, ts: Date.now(), by: myBy(), dirty: true, deleted: false }); await savePhoto(p); }
 
   /* ---------- 녹음 ---------- */
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let RS = null, recTimer = null;
   const fmtDur = ms => { const s = Math.round((ms || 0) / 1000); return pad(Math.floor(s / 60)) + ':' + pad(s % 60); };
   function renderRecsSoon() { REC_SIG = ''; refreshView(); }
@@ -452,6 +450,7 @@
     return `${(o.topics || []).map(t => `<div class="sumt">${esc(t.title)}</div><ul>${(t.lines || []).map(l => `<li>${esc(l)}</li>`).join('')}</ul>`).join('')}
       ${(o.qa || []).length ? `<div class="sumt">문답</div>${o.qa.map(q => `<div class="qa"><b>Q.</b> ${esc(q.q)}<br><b>A.</b> ${esc(q.a)}</div>`).join('')}` : ''}`;
   }
+  function speakersLine(o) { const sp = o && o.speakers; if (!sp || typeof sp !== 'object') return ''; const t = Object.entries(sp).map(([k, v]) => `${k} = ${v}`).join(' · '); return t ? `<div class="small">화자: ${esc(t)}</div>` : ''; }
   function summaryText(o, r) {
     if (!o) return ''; const L = [`[녹음 요약 ${r ? hhmm(new Date(r.created)) : ''}]`];
     if (o.text) L.push(o.text);
@@ -463,33 +462,37 @@
   }
   function drawRecs(cid) {
     const box = $('#recsec'); if (!box) return;
-    const list = recsOf(cid); const live = localStorage.getItem(LS + 'live') === '1';
-    const sig = (RS && RS.cid === cid ? 'R' : '') + live + list.map(r => [r.id, r.ts, r.status, r.dirty, (r.summary || '').length, (r.transcript || '').length, r.enc ? 1 : 0].join('/')).join() + '|' + val(cid, 'livedraft');
+    const list = recsOf(cid);
+    const sig = cid + ':' + (RS && RS.cid === cid ? 'R' : '') + list.map(r => [r.id, r.ts, r.status, r.dirty, r.conv ? 1 : 0, (r.summary || '').length, (r.transcript || '').length, r.enc ? 1 : 0].join('/')).join();
     if (sig === REC_SIG) return; REC_SIG = sig;
     const recording = RS && RS.cid === cid;
     box.innerHTML = `<h2>녹음 <span class="small">${list.length ? list.length + '개' : ''}</span></h2>
       <div class="notice">🎙 녹음 전 상대방에게 녹음 사실을 알려 주세요.</div>
       <button class="btn big ${recording ? 'warn' : ''}" id="recbtn">${recording ? '■ 녹음 멈추기 ' + fmtDur(Date.now() - RS.start) : '● 녹음 시작'}</button>
-      ${SR ? `<label class="chkline"><input type="checkbox" id="livetg" ${live ? 'checked' : ''} ${recording ? 'disabled' : ''}> 실시간 초안(브라우저 받아쓰기, 선택)</label>` : '<p class="small">이 브라우저는 실시간 초안을 지원하지 않아요. 녹음만 하면 나중에 받아쓰기·요약이 돼요.</p>'}
-      ${recording && RS.sr ? `<div class="live" id="livebox">${esc(RS.draft)}<i>${esc(RS.interim || '')}</i></div>` : ''}
-      ${val(cid, 'livedraft') ? `<details class="sub"><summary>실시간 초안 <span class="mk">${esc(marker(item(cid, 'livedraft')))}</span></summary><div class="pre">${esc(val(cid, 'livedraft'))}</div></details>` : ''}
       <div id="reclist">${list.map(r => {
-        const st = r.dirty && !r.path ? 'local' : r.status || 'pending'; const o = parseSummary(r.summary);
-        return `<div class="rec"><div class="rhead"><b>${hhmm(new Date(r.created))} · ${fmtDur(r.duration)}</b><span class="rst rs-${st}">${REC_STATUS[st] || st}</span></div>
+        const st = r.dirty && !r.path ? 'local' : r.status || 'uploaded'; const o = parseSummary(r.summary);
+        return `<div class="rec"><div class="rhead"><b>${hhmm(new Date(r.created))} · ${fmtDur(r.duration)}</b><span class="rst rs-${st}">${REC_STATUS[st] || st}${st === 'local' && r.conv ? ' · 변환 예약' : ''}</span></div>
           <div class="mk">${esc(marker(r))}${r.error ? ' · 사유: ' + esc(r.error) : ''}</div>
           <div class="btns"><button class="btn sub" data-play="${r.id}">▶ 듣기</button><button class="btn warn" data-rdel="${r.id}">지우기</button></div>
-          ${st === 'failed' ? `<button class="btn sub big" data-retry="${r.id}">다시 요청</button>` : ''}
+          ${(st === 'uploaded' || (st === 'local' && !r.conv)) ? `<button class="btn big" data-conv="${r.id}">변환</button>` : ''}${st === 'failed' ? `<button class="btn sub big" data-conv="${r.id}">다시 시도</button>` : ''}${st === 'done' ? `<button class="btn sub" data-conv="${r.id}">다시 변환</button>` : ''}
           <div id="aud-${r.id}"></div>
-          ${o ? `<div class="sumbox"><div class="sumh">녹음 요약</div>${summaryHTML(o)}</div>` : ''}
+          ${o ? `<div class="sumbox"><div class="sumh">녹음 요약</div>${speakersLine(o)}${summaryHTML(o)}</div>` : ''}
           ${r.transcript ? `<details class="sub"><summary>받아쓰기 원문</summary><div class="pre">${esc(r.transcript)}</div></details>` : ''}</div>`;
       }).join('')}</div>`;
     $('#recbtn').onclick = () => recording ? stopRec() : startRec(cid);
-    const lt = $('#livetg'); if (lt) lt.onchange = () => { localStorage.setItem(LS + 'live', lt.checked ? '1' : '0'); REC_SIG = ''; };
     box.querySelectorAll('[data-play]').forEach(b => b.onclick = () => playRec(b.dataset.play));
     box.querySelectorAll('[data-rdel]').forEach(b => b.onclick = async () => { if (!confirm('이 녹음을 지울까요? 받아쓰기·요약도 함께 지워지고, 다른 사람 화면에서도 사라져요.')) return; await deleteRec(b.dataset.rdel); REC_SIG = ''; drawRecs(cid); kick(100); });
-    box.querySelectorAll('[data-retry]').forEach(b => b.onclick = async () => { try { const { data, error } = await sb.rpc('expo_retry_rec', { p_id: b.dataset.retry }); if (error) throw error; await applyRec(data, false); REC_SIG = ''; drawRecs(cid); } catch (e) { toast('지금은 다시 요청할 수 없어요.'); } });
+    box.querySelectorAll('[data-conv]').forEach(b => b.onclick = () => { const r = RECS[b.dataset.conv]; if (r && r.status === 'done' && !confirm('이 녹음을 다시 변환할까요? 지금 요약은 새 결과로 바뀌어요.')) return; requestConv(b.dataset.conv, cid); });
   }
 
+  // [변환]/[다시 시도]: 서버에서 uploaded·failed → pending (작업자가 그때부터 받아쓰기·요약)
+  async function requestConv(id, cid) {
+    const r = RECS[id]; if (!r) return;
+    if (!r.path) { r.conv = true; await saveRec(r); REC_SIG = ''; drawRecs(cid); toast('올라가면 바로 변환해요.'); kick(100); return; }
+    if (!sb || !isConn()) { toast('연결되면 다시 눌러 주세요.'); return; }
+    try { const { data, error } = await sb.rpc('expo_request_rec', { p_id: id, p_by: (ME && ME.no) || null }); if (error) throw error; r.conv = false; await applyRec(data, false); REC_SIG = ''; drawRecs(cid); toast('변환을 시작했어요.'); }
+    catch (e) { toast('지금은 변환을 요청할 수 없어요.'); }
+  }
   async function startRec(cid) {
     if (RS) return;
     if (!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('이 브라우저는 녹음을 지원하지 않아요.'); return; }
@@ -498,25 +501,14 @@
     catch (e) { toast('마이크를 쓸 수 없어요. 브라우저 설정에서 마이크를 허용해 주세요.'); return; }
     const mime = ['audio/webm;codecs=opus', 'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm'].find(m => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || '';
     let mr; try { mr = new MediaRecorder(stream, Object.assign({ audioBitsPerSecond: 24000 }, mime ? { mimeType: mime } : {})); } catch (_) { mr = new MediaRecorder(stream); }
-    RS = { cid, mr, chunks: [], start: Date.now(), stream, mime: mr.mimeType || mime || 'audio/webm', draft: '', interim: '', sr: null };
+    RS = { cid, mr, chunks: [], start: Date.now(), stream, mime: mr.mimeType || mime || 'audio/webm' };
     mr.ondataavailable = e => { if (e.data && e.data.size) RS && RS.chunks.push(e.data); };
     mr.start(1000);
-    if (SR && localStorage.getItem(LS + 'live') === '1') startLive();
     REC_SIG = ''; drawRecs(cid);
     clearInterval(recTimer); recTimer = setInterval(() => { const b = $('#recbtn'); if (RS && b) b.textContent = '■ 녹음 멈추기 ' + fmtDur(Date.now() - RS.start); if (RS && Date.now() - RS.start > 60 * 60 * 1000) stopRec(); }, 500);
   }
-  function startLive() {
-    try {
-      const sr = new SR(); sr.lang = 'ko-KR'; sr.continuous = true; sr.interimResults = true; RS.sr = sr;
-      sr.onresult = ev => { let interim = ''; for (let i = ev.resultIndex; i < ev.results.length; i++) { const t = ev.results[i][0].transcript; if (ev.results[i].isFinal) RS.draft += t.trim() + '\n'; else interim += t; } RS.interim = interim; const lb = $('#livebox'); if (lb) lb.innerHTML = esc(RS.draft) + '<i>' + esc(interim) + '</i>'; };
-      sr.onerror = ev => { if (['not-allowed', 'audio-capture', 'service-not-allowed'].includes(ev.error)) { RS && (RS.sr = null); localStorage.setItem(LS + 'live', '0'); toast('실시간 초안이 녹음과 함께 안 돼서 껐어요. 녹음은 계속돼요.'); } };
-      sr.onend = () => { if (RS && RS.sr === sr) { try { sr.start(); } catch (_) {} } };
-      sr.start();
-    } catch (e) { RS.sr = null; toast('실시간 초안을 켤 수 없어요. 녹음만 할게요.'); }
-  }
   async function stopRec() {
     if (!RS) return; const R = RS; clearInterval(recTimer);
-    if (R.sr) { const sr = R.sr; R.sr = null; try { sr.stop(); } catch (_) {} }
     await new Promise(res => { R.mr.onstop = res; try { R.mr.stop(); } catch (_) { res(); } });
     R.stream.getTracks().forEach(t => t.stop()); RS = null;
     const blob = new Blob(R.chunks, { type: R.mime }); const now = Date.now();
@@ -524,7 +516,6 @@
     const plain = !SKEY; const enc = plain ? bytes : await encBytes(bytes);
     const r = { id: R.cid + '-rec-' + rid(), cid: R.cid, mime: R.mime, duration: now - R.start, size: enc.length, created: R.start, ts: now, by: myBy(), path: null, deleted: false, dirty: true, enc: new Blob([enc]), plain, status: 'local', transcript: '', summary: '', oldPaths: [] };
     RECS[r.id] = r; await saveRec(r);
-    if (R.draft.trim()) { const cur = val(R.cid, 'livedraft'); setField(R.cid, 'livedraft', (cur ? cur + '\n---\n' : '') + `[${hhmm(new Date(R.start))}] ` + R.draft.trim()); }
     toast(navigator.onLine ? '녹음을 저장했어요. 올리는 중…' : '녹음을 이 기기에 저장했어요. 연결되면 자동으로 올려요.');
     REC_SIG = ''; drawRecs(R.cid); kick(100);
   }
@@ -699,8 +690,7 @@
         <p class="small">서버와 별개로 손에 들고 있는 사본이에요. 카톡 등으로 보내 두거나, 다른 기기에서 ‘백업 불러오기’로 합칠 수 있어요.</p>
         <div class="btns"><button class="btn" id="b-share">백업 보내기</button><button class="btn sub" id="b-save">백업 파일 받기</button></div>
         <div class="btns one"><label class="btn sub">📂 백업 불러오기<input type="file" id="b-imp" accept=".json,application/json" hidden></label></div></div>
-      <div class="sec"><h2>이 기기 정리</h2><p class="small">행사가 끝난 뒤에만 쓰세요. 서버의 함께 쓴 기록은 지워지지 않아요.</p><button class="btn warn big" id="wipe">이 기기의 기록·잠금 해제 지우기</button></div>
-      <p class="small" style="text-align:center">${COMPANY} · ${esc(DATA.docNo)} · 버전 ${esc(window.APP_VERSION || '')}</p>`, navBar('#more'));
+      <div class="sec"><h2>이 기기 정리</h2><p class="small">행사가 끝난 뒤에만 쓰세요. 서버의 함께 쓴 기록은 지워지지 않아요.</p><button class="btn warn big" id="wipe">이 기기의 기록·잠금 해제 지우기</button></div>`, navBar('#more'));
     bindUpgrade();
     $('#syncinfo').textContent = NET.lastSync ? '마지막으로 맞춘 시각 ' + hhmmss(new Date(NET.lastSync)) + (NET.err ? ' · 문제: ' + NET.err : '') : (NET.err ? '문제: ' + NET.err : '');
     $('#syncnow').onclick = async () => { await syncNow(); if (sb && NET.connected) await pullAll(); $('#syncinfo').textContent = '마지막으로 맞춘 시각 ' + hhmmss(new Date()) + (NET.err ? ' · 문제: ' + NET.err : ''); };

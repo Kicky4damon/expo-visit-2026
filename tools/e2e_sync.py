@@ -131,16 +131,23 @@ with sync_playwright() as p:
     # ---- 녹음 (가짜 마이크)
     for pg in (A_, B_): pg.goto(URL + '#c/' + C1); pg.wait_for_selector('#recbtn')
     check('녹음 안내 문구', '녹음 전 상대방에게 녹음 사실을 알려 주세요.' in A_.text_content('#recsec'))
-    sr_supported = A_.evaluate("!!(window.SpeechRecognition||window.webkitSpeechRecognition)")
+    live_gone = A_.query_selector('#livetg') is None and A_.query_selector('#livebox') is None and '실시간 초안' not in A_.text_content('main')
+    check('실시간 초안(Web Speech) 기능 없음', live_gone)
     pre = {r['id'] for r in st(A_)['recs']}
     A_.click('#recbtn'); time.sleep(3.2); A_.click('#recbtn')
     wait(A_, "window.__expo.state().recs.some(r=>r.path && !r.dirty && r.cid===%r && !%r.includes(r.id))" % (C1, sorted(pre)), timeout=30000)
     rec = [r for r in st(A_)['recs'] if r['cid'] == C1 and r['id'] not in pre][0]
     raw = A.storage_get(rec['path'])[1]
     plain = A.dec_bytes(raw)
-    check('녹음 → 암호화 → Storage 업로드 → 작업 생성', rec['status'] in ('pending', 'processing', 'done') and (plain[:4] == b'\x1aE\xdf\xa3' or plain[4:8] == b'ftyp'), f"{rec['mime']}, {rec['duration']}ms, 암호문 {len(raw)}B, 상태 {rec['status']}")
-    wait(B_, "[...document.querySelectorAll('#reclist .rst')].some(e=>/대기|처리 중|완료/.test(e.textContent))", timeout=20000)
-    check('B 화면에 녹음·작업 상태 표시', True, B_.text_content('#reclist .rst'))
+    time.sleep(6); srow = [r for r in A.rows('expo_recordings', SAPP) if r['id'] == rec['id']][0]
+    check('녹음 → 암호화 → Storage 업로드 → 자동 변환 안 함(status=uploaded 유지)', srow['status'] == 'uploaded' and srow['worker'] is None and (plain[:4] == b'\x1aE\xdf\xa3' or plain[4:8] == b'ftyp'), f"{rec['mime']}, {rec['duration']}ms, 암호문 {len(raw)}B, 상태 {rec['status']}")
+    wait(B_, "!!document.querySelector('[data-conv=\"%s\"]')" % rec['id'], timeout=20000)
+    check('B 화면: “변환 전” + [변환] 버튼', '변환 전' in B_.text_content('#reclist'), B_.text_content('#reclist .rst'))
+    B_.evaluate("document.querySelector('#recsec').scrollIntoView()"); time.sleep(0.3); shot(B_, 's6a_rec_uploaded_convert_btn')
+    B_.click('[data-conv="%s"]' % rec['id'])
+    wait(A_, "[...document.querySelectorAll('#reclist .rst')].some(e=>/변환 대기|변환 중|완료/.test(e.textContent))", timeout=20000)
+    srow = [r for r in A.rows('expo_recordings', SAPP) if r['id'] == rec['id']][0]
+    check('[변환] 누름 → 서버 pending → A 화면에도 “변환 대기/중”', srow['status'] in ('pending', 'processing', 'done'), srow['status'])
     # 박스의 실제 받아쓰기·요약 작업자가 돌고 있으면 그쪽 결과를, 15초 안에 아무도 안 가져가면 가짜 작업자로 대신
     t0 = time.time(); who_done = None; seen_proc = False
     while time.time() - t0 < 240:
@@ -176,16 +183,41 @@ with sync_playwright() as p:
             if name == 'actions 있음': B_.evaluate("document.querySelector('#recsec').scrollIntoView()"); time.sleep(0.3); shot(B_, 's6_recording_summary')
         check('녹음 요약 표시(주제·문답) — 후속 조치 없음, actions 비어도/없어도 동작, ‘메모에 넣기’ 버튼 없음', all(o for _, o in res) and B_.query_selector('[data-apply]') is None, str(res))
         # 받아쓰기 원문 표시: 서버 행에 원문을 넣어 Realtime으로 화면 갱신 확인(가짜 마이크는 삐 소리라 실제 원문이 비어 있을 수 있음)
-        A.call('PATCH', f"/rest/v1/expo_recordings?id=eq.{rec['id']}", {'transcript_enc': A.enc_text('받아쓰기 원문 표시 확인용 문장입니다.')}, headers={'Prefer': 'return=minimal'})
+        A.call('PATCH', f"/rest/v1/expo_recordings?id=eq.{rec['id']}", {'transcript_enc': A.enc_text('[A] 받아쓰기 원문 표시 확인용 문장입니다.\n[B] 네, 월 단위로 됩니다.')}, headers={'Prefer': 'return=minimal'})
         wait(B_, "[...document.querySelectorAll('#reclist details.sub')].some(d=>d.textContent.includes('받아쓰기 원문 표시 확인용') && !d.open)", timeout=20000)
-        check('받아쓰기 원문은 접힌 상자(<details>)에, Realtime 갱신', True)
+        B_.evaluate("document.querySelector('#reclist details.sub').open=true"); time.sleep(0.3)
+        lines_ok = B_.evaluate("(()=>{const e=document.querySelector('#reclist details.sub .pre');return e.textContent.includes('[A] 받아쓰기')&&e.textContent.includes('\\n[B] 네')&&getComputedStyle(e).whiteSpace==='pre-wrap'})()")
+        B_.evaluate("document.querySelector('#recsec').scrollIntoView()"); time.sleep(0.2); shot(B_, 's6b_transcript_speakers')
+        B_.evaluate("document.querySelector('#reclist details.sub').open=false")
+        check('받아쓰기 원문은 접힌 상자(<details>)에, 화자 표기 [A]/[B] 줄 단위 표시, Realtime 갱신', lines_ok)
+        # 실패 → [다시 시도]
+        A.call('PATCH', f"/rest/v1/expo_recordings?id=eq.{rec['id']}", {'status': 'failed', 'error': '테스트 실패'}, headers={'Prefer': 'return=minimal'})
+        wait(B_, "!!document.querySelector('[data-conv=\"%s\"]') && document.querySelector('[data-conv=\"%s\"]').textContent.includes('다시 시도')" % (rec['id'], rec['id']), timeout=20000)
+        B_.evaluate("document.querySelector('#recsec').scrollIntoView()"); time.sleep(0.2); shot(B_, 's6c_failed_retry')
+        B_.click('[data-conv="%s"]' % rec['id']); time.sleep(2)
+        srow = [r for r in A.rows('expo_recordings', SAPP) if r['id'] == rec['id']][0]
+        check('실패 → [다시 시도] → 서버 pending', srow['status'] in ('pending', 'processing', 'done'), srow['status'])
+        # 다시 완료 상태로 돌려 놓기(보고서 확인용)
+        for _ in range(20):
+            job = A.claim()
+            if job and job.get('id') == rec['id']: A.finish(job['id'], '[A] 테스트 원문', dict(base)); break
+            if job and job.get('id'): A.call('PATCH', f"/rest/v1/expo_recordings?id=eq.{job['id']}", {'status': 'pending', 'worker': None}, headers={'Prefer': 'return=minimal'})
+            srow = [r for r in A.rows('expo_recordings', SAPP) if r['id'] == rec['id']][0]
+            if srow['status'] == 'done': break
+            time.sleep(1)
+        wait(A_, "!!document.querySelector('#reclist .sumbox')", timeout=30000)
     # 오프라인 녹음
     devs['B'][0].set_offline(True); time.sleep(0.3)
+    preB = {r['id'] for r in st(B_)['recs']}
     B_.click('#recbtn'); time.sleep(2.2); B_.click('#recbtn'); time.sleep(0.8)
-    off_local = any(r['dirty'] and not r['path'] for r in st(B_)['recs'])
+    offr = [r for r in st(B_)['recs'] if r['id'] not in preB]
+    off_local = bool(offr) and offr[0]['dirty'] and not offr[0]['path']
+    B_.click('[data-conv="%s"]' % offr[0]['id']); time.sleep(0.5)
+    reserved = '변환 예약' in B_.text_content('#reclist')
     devs['B'][0].set_offline(False); B_.evaluate("window.dispatchEvent(new Event('online'))")
-    wait(B_, "window.__expo.state().recs.filter(r=>!r.deleted).every(r=>r.path && !r.dirty)", timeout=40000)
-    check('오프라인 녹음은 기기에 저장 → 재연결 후 자동 업로드·작업 생성', off_local and len([r for r in A.rows('expo_recordings', SAPP) if not r['deleted'] and r['cid'] == C1]) >= 2)
+    wait(B_, "window.__expo.state().recs.filter(r=>!r.deleted).every(r=>r.path && !r.dirty)", timeout=40000); time.sleep(2)
+    srow = [r for r in A.rows('expo_recordings', SAPP) if r['id'] == offr[0]['id']]
+    check('오프라인 녹음은 기기에 저장 → [변환] 예약 → 재연결 후 업로드·변환 요청(pending)', off_local and reserved and srow and srow[0]['status'] in ('pending', 'processing', 'done', 'failed'), srow and srow[0]['status'])
     # ---- 보고서 (녹음 요약·문답 포함, 원문·번호 없음)
     A_.goto(URL + '#report'); A_.wait_for_selector('#preview .rep'); time.sleep(0.8)
     rep = A_.text_content('#preview')
@@ -203,7 +235,6 @@ with sync_playwright() as p:
     check('녹음 삭제 → B에서 사라짐 + tombstone + Storage 삭제', srvr['deleted'] and not A.storage_exists(rec['path']))
     errs = sum((devs[n][1]._errs for n in 'ABC'), [])
     check('화면 스크립트 오류 없음(3대)', not errs, '; '.join(errs)[:200])
-    check('Web Speech API(실시간 초안) 지원 여부 — 헤드리스 Chromium', True, '지원됨' if sr_supported else '미지원(토글 대신 안내 문구 표시)')
     br.close()
 A.cleanup((SAPP,))
 npass = sum(1 for r in R if r[1]); print(f'\n결과: {npass}/{len(R)} 통과')
