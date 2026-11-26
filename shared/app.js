@@ -1,8 +1,17 @@
-/* KINTEX 스마트건설 EXPO 방문 기록 — 엘림주식회사. 빌드 도구 없음, 단일 스크립트. */
+/* KINTEX 스마트건설 EXPO 방문 기록 v2 — 엘림주식회사. 실시간 함께 쓰기(Supabase), 오프라인 우선, 빌드 도구 없음. */
 (function () {
   'use strict';
   const CFG = window.APP; // {id, title, db}
-  const LS = 'expo2026-' + CFG.id + '-';
+  const NS_TEST = new URLSearchParams(location.search).get('ns') === 'test';
+  const SYNC_APP = NS_TEST ? 't' + CFG.id.slice(1) : CFG.id;           // 서버 쪽 앱 이름(검증용 t1/t2 분리)
+  const DBNAME = CFG.db + (NS_TEST ? '-test' : '');
+  const LS = 'expo2026-' + CFG.id + (NS_TEST ? '-test' : '') + '-';
+  const SC = window.SYNC_CONFIG || { kind: 'none' };
+  const COMPANY = '엘림주식회사';
+  const FIELDS = ['answer', 'met', 'memo', 'followup'];
+  const FIELD_LABEL = { answer: '받은 답변', met: '만난 사람', memo: '자유 메모', followup: '후속 조치' };
+  const STATUS = { none: '미방문', doing: '방문중', done: '완료' };
+  const REC_STATUS = { local: '보낼 준비(오프라인 저장)', uploading: '올리는 중', pending: '대기 중', processing: '처리 중', done: '완료', failed: '실패' };
   const $ = (s, r = document) => r.querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const pad = n => String(n).padStart(2, '0');
@@ -10,14 +19,22 @@
   const hhmmss = d => hhmm(d) + ':' + pad(d.getSeconds());
   const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   const fmtTime = t => { if (!t) return ''; const d = new Date(t); return ymd(d) + ' ' + hhmm(d); };
-  const COMPANY = '엘림주식회사';
+  const rid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const newer = (a, b) => !b || (a.ts > b.ts) || (a.ts === b.ts && (a.by || 0) > (b.by || 0));
 
-  /* ---------- IndexedDB ---------- */
+  /* ---------- IndexedDB (v1 → v2 업그레이드 시 기존 자료 보존) ---------- */
   let dbp;
   function db() {
     if (!dbp) dbp = new Promise((res, rej) => {
-      const r = indexedDB.open(CFG.db, 1);
-      r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('kv'); d.createObjectStore('entries'); const p = d.createObjectStore('photos', { keyPath: 'id' }); p.createIndex('cid', 'cid'); };
+      const r = indexedDB.open(DBNAME, 2);
+      r.onupgradeneeded = ev => {
+        const d = r.result, names = d.objectStoreNames;
+        if (!names.contains('kv')) d.createObjectStore('kv');
+        if (!names.contains('entries')) d.createObjectStore('entries');            // v1 자료(이관 후에도 보존)
+        if (!names.contains('photos')) { const p = d.createObjectStore('photos', { keyPath: 'id' }); p.createIndex('cid', 'cid'); }
+        if (!names.contains('items')) d.createObjectStore('items');
+        if (!names.contains('recs')) d.createObjectStore('recs', { keyPath: 'id' });
+      };
       r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
     });
     return dbp;
@@ -38,157 +55,377 @@
   const idbAllKeys = st => tx(st, 'readonly', s => s.getAllKeys());
   const idbClear = st => tx(st, 'readwrite', s => s.clear());
 
-  /* ---------- state ---------- */
-  let DATA = null;            // decrypted company data
-  const ENT = {};             // cid -> entry
-  let META = { opinion: '', writer: '', visitDate: '2026-11-27', maskPhones: false, updatedAt: 0 };
-  let PHOTOS = [];            // {id,cid,kind,blob,w,h,created}
-  const urls = new Map();
-  let lastSaved = 0, dirty = false, saveTimer = null;
-  const pendingEnt = new Set(); let pendingMeta = false;
-
-  const blankEntry = () => ({ visited: false, visitedAt: 0, answer: '', memo: '', met: '', followup: '', updatedAt: 0 });
-  const entry = cid => ENT[cid] || (ENT[cid] = blankEntry());
-  const photosOf = (cid, kind) => PHOTOS.filter(p => p.cid === cid && (!kind || p.kind === kind)).sort((a, b) => a.created - b.created);
-  const urlOf = p => { if (!urls.has(p.id)) urls.set(p.id, URL.createObjectURL(p.blob)); return urls.get(p.id); };
-
-  /* ---------- saving: localStorage (즉시, 동기) + IndexedDB (곧바로) ---------- */
-  function touchEntry(cid) {
-    const e = entry(cid); e.updatedAt = Date.now();
-    try { localStorage.setItem(LS + 'e-' + cid, JSON.stringify(e)); } catch (_) {}
-    pendingEnt.add(cid); markDirty();
-  }
-  function touchMeta() {
-    META.updatedAt = Date.now();
-    try { localStorage.setItem(LS + 'meta', JSON.stringify(META)); } catch (_) {}
-    pendingMeta = true; markDirty();
-  }
-  function markDirty() { dirty = true; showSaved(); clearTimeout(saveTimer); saveTimer = setTimeout(flush, 250); }
-  async function flush() {
-    clearTimeout(saveTimer);
-    const ids = [...pendingEnt]; pendingEnt.clear();
-    const m = pendingMeta; pendingMeta = false;
-    try {
-      for (const cid of ids) await idbPut('entries', ENT[cid], cid);
-      if (m) await idbPut('kv', META, 'meta');
-      lastSaved = Date.now(); dirty = pendingEnt.size > 0 || pendingMeta;
-    } catch (err) { toast('저장 중 문제가 생겼어요. 다시 눌러 주세요.'); dirty = true; }
-    showSaved();
-  }
-  function showSaved() {
-    const el = $('#saved'); if (!el) return;
-    if (dirty) { el.textContent = '저장 중…'; el.classList.add('dirty'); }
-    else { el.textContent = lastSaved ? '저장됨 ' + hhmmss(new Date(lastSaved)) : '자동 저장'; el.classList.remove('dirty'); }
-  }
-  window.addEventListener('pagehide', () => { flush(); });
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
-
-  async function loadAll() {
-    const keys = await idbAllKeys('entries'); const vals = await idbAll('entries');
-    keys.forEach((k, i) => { ENT[k] = Object.assign(blankEntry(), vals[i]); });
-    const m = await idbGet('kv', 'meta'); if (m) META = Object.assign(META, m);
-    // localStorage 사본이 더 새로우면(닫기 직전 입력) 그것을 씀
-    for (const c of DATA.companies) {
-      try { const ls = JSON.parse(localStorage.getItem(LS + 'e-' + c.id) || 'null'); if (ls && (!ENT[c.id] || (ls.updatedAt || 0) > (ENT[c.id].updatedAt || 0))) { ENT[c.id] = Object.assign(blankEntry(), ls); pendingEnt.add(c.id); } } catch (_) {}
-    }
-    try { const lm = JSON.parse(localStorage.getItem(LS + 'meta') || 'null'); if (lm && (lm.updatedAt || 0) > (META.updatedAt || 0)) { META = Object.assign(META, lm); pendingMeta = true; } } catch (_) {}
-    PHOTOS = await idbAll('photos');
-    const t = Math.max(0, META.updatedAt || 0, ...Object.values(ENT).map(e => e.updatedAt || 0));
-    lastSaved = t; if (pendingEnt.size || pendingMeta) await flush();
-  }
-
-  /* ---------- 암호 풀기 ---------- */
+  /* ---------- 암호 ---------- */
+  const te = new TextEncoder(), td = new TextDecoder();
   const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
-  async function decrypt(pw) {
+  const b64e = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+  async function pbkdf2(pw, salt, iter) { return crypto.subtle.importKey('raw', te.encode(pw), 'PBKDF2', false, ['deriveKey', 'deriveBits']).then(base => ({ base, salt, iter })); }
+  async function deriveAes(pw, salt, iter) { const { base } = await pbkdf2(pw); return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: typeof salt === 'string' ? te.encode(salt) : salt, iterations: iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']); }
+  async function deriveHex(pw, salt, iter) { const { base } = await pbkdf2(pw); const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: te.encode(salt), iterations: iter, hash: 'SHA-256' }, base, 256); return [...new Uint8Array(bits)].map(b => b.toString(16).padStart(2, '0')).join(''); }
+  let SKEY = null, AUTHPW = null;
+  async function encBytes(u8) { const iv = crypto.getRandomValues(new Uint8Array(12)); const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, SKEY, u8)); const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12); return out; }
+  async function decBytes(u8) { return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u8.subarray(0, 12) }, SKEY, u8.subarray(12))); }
+  const encText = async s => b64e(await encBytes(te.encode(String(s == null ? '' : s))));
+  const decText = async s => s == null ? '' : td.decode(await decBytes(b64d(s)));
+
+  /* ---------- 상태 ---------- */
+  let DATA = null;
+  const ITEMS = {};   // "cid|field" -> {cid, field, v, ts, by, dirty}
+  const PHOTOS = {};  // id -> {id,cid,kind,blob,w,h,created,ts,by,path,deleted,dirty,oldPaths}
+  const RECS = {};    // id -> {id,cid,mime,duration,size,created,ts,by,path,deleted,dirty,enc(Blob),status,error,transcript,summary,oldPaths}
+  let ME = { no: null, tmp: null };
+  const urls = new Map();
+  let lastSaved = 0;
+  const NET = { online: navigator.onLine, connected: false, peers: [], lastSync: 0, err: '' };
+
+  const key = (cid, f) => cid + '|' + f;
+  const item = (cid, f) => ITEMS[key(cid, f)];
+  const val = (cid, f, d = '') => { const it = item(cid, f); return it ? it.v : d; };
+  const status = cid => val(cid, 'status', 'none') || 'none';
+  const myBy = () => ME.no || 0;
+  const who = by => by ? '사용자 ' + by : '사용자 ?(임시)';
+  const marker = obj => obj && obj.ts ? `${who(obj.by)} · ${hhmm(new Date(obj.ts))}` : '';
+  const photosOf = (cid, kind) => Object.values(PHOTOS).filter(p => p.cid === cid && !p.deleted && (!kind || p.kind === kind)).sort((a, b) => a.created - b.created);
+  const recsOf = cid => Object.values(RECS).filter(r => r.cid === cid && !r.deleted).sort((a, b) => a.created - b.created);
+  const urlOf = p => { if (!p.blob) return ''; const k = p.id + ':' + p.ts; if (!urls.has(k)) urls.set(k, URL.createObjectURL(p.blob)); return urls.get(k); };
+  const dirtyCount = () => Object.values(ITEMS).filter(x => x.dirty).length + Object.values(PHOTOS).filter(x => x.dirty).length + Object.values(RECS).filter(x => x.dirty).length;
+
+  /* ---------- 로컬 저장 ---------- */
+  function lsPut(it) { try { localStorage.setItem(LS + 'i-' + key(it.cid, it.field), JSON.stringify(it)); } catch (_) {} }
+  async function saveItem(it) { lsPut(it); await idbPut('items', it, key(it.cid, it.field)); lastSaved = Date.now(); showSaved(); renderNet(); }
+  const photoRec = p => ({ id: p.id, cid: p.cid, kind: p.kind, blob: p.blob, w: p.w, h: p.h, created: p.created, ts: p.ts, by: p.by, path: p.path || null, deleted: !!p.deleted, dirty: !!p.dirty, oldPaths: p.oldPaths || [] });
+  async function savePhoto(p) { await idbPut('photos', photoRec(p)); lastSaved = Date.now(); showSaved(); renderNet(); }
+  const recRec = r => { const o = Object.assign({}, r); delete o.url; return o; };
+  async function saveRec(r) { await idbPut('recs', recRec(r)); lastSaved = Date.now(); showSaved(); renderNet(); }
+
+  function setField(cid, f, v) {   // 로컬 편집
+    const it = ITEMS[key(cid, f)] = { cid, field: f, v, ts: Date.now(), by: myBy(), dirty: true };
+    saveItem(it); kick(); return it;
+  }
+
+  async function loadLocal() {
+    const keys = await idbAllKeys('items'), vals = await idbAll('items');
+    keys.forEach((k, i) => { ITEMS[k] = vals[i]; });
+    // localStorage 사본(닫기 직전 입력)이 더 새로우면 반영
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i); if (!k || !k.startsWith(LS + 'i-')) continue;
+      try { const it = JSON.parse(localStorage.getItem(k)); const cur = ITEMS[key(it.cid, it.field)]; if (newer(it, cur)) { ITEMS[key(it.cid, it.field)] = it; await idbPut('items', it, key(it.cid, it.field)); } } catch (_) {}
+    }
+    for (const p of await idbAll('photos')) PHOTOS[p.id] = p;
+    for (const r of await idbAll('recs')) RECS[r.id] = r;
+    ME = (await idbGet('kv', 'me')) || ME;
+    SKEY = (await idbGet('kv', 'skey')) || null; AUTHPW = (await idbGet('kv', 'authpw')) || null;
+    lastSaved = Math.max(0, ...Object.values(ITEMS).map(x => x.ts || 0));
+    await migrateV1();
+  }
+  async function migrateV1() {    // v1(동기화 전) 자료 → v2 항목. 원본 v1 저장소는 지우지 않음
+    if (await idbGet('kv', 'migrated2')) return;
+    const keys = await idbAllKeys('entries'), vals = await idbAll('entries');
+    const ent = {}; keys.forEach((k, i) => { ent[k] = vals[i]; });
+    for (const c of (DATA ? DATA.companies : [])) {   // v1 localStorage 사본
+      try { const ls = JSON.parse(localStorage.getItem(LS + 'e-' + c.id) || 'null'); if (ls && (!ent[c.id] || (ls.updatedAt || 0) > (ent[c.id].updatedAt || 0))) ent[c.id] = ls; } catch (_) {}
+    }
+    const put = async (cid, f, v, ts) => { if (v == null || v === '' || item(cid, f)) return; const it = { cid, field: f, v, ts: ts || Date.now(), by: 0, dirty: true }; ITEMS[key(cid, f)] = it; await saveItem(it); };
+    for (const [cid, e] of Object.entries(ent)) {
+      if (e.visited) await put(cid, 'status', 'done', e.visitedAt || e.updatedAt);
+      for (const f of FIELDS) await put(cid, f, e[f], e.updatedAt);
+    }
+    let meta = await idbGet('kv', 'meta');
+    try { const lm = JSON.parse(localStorage.getItem(LS + 'meta') || 'null'); if (lm && (!meta || (lm.updatedAt || 0) > (meta.updatedAt || 0))) meta = lm; } catch (_) {}
+    if (meta) { await put('_meta', 'opinion', meta.opinion, meta.updatedAt); await put('_meta', 'writer', meta.writer, meta.updatedAt); if (meta.maskPhones) localStorage.setItem(LS + 'mask', '1'); }
+    for (const p of Object.values(PHOTOS)) if (p.ts == null) { Object.assign(p, { ts: p.created || Date.now(), by: 0, path: null, deleted: false, dirty: true, oldPaths: [] }); await savePhoto(p); }
+    await idbPut('kv', Date.now(), 'migrated2');
+  }
+
+  /* ---------- 동기화 (Supabase) ---------- */
+  let sb = null, chan = null, kickT = null, loopT = null, syncing = false, presenceKey = rid();
+  const syncReady = () => SC.kind === 'supabase' && SKEY && AUTHPW;
+  function kick(ms = 600) { clearTimeout(kickT); kickT = setTimeout(syncNow, ms); }
+  window.addEventListener('online', () => { NET.online = true; renderNet(); kick(100); });
+  window.addEventListener('offline', () => { NET.online = false; NET.connected = false; renderNet(); });
+  async function ensureClient() {
+    if (sb) return sb;
+    sb = window.supabase.createClient(SC.url, SC.anonKey, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'expo2026-auth' + (NS_TEST ? '-test' : '') }, realtime: { params: { eventsPerSecond: 20 } } });
+    return sb;
+  }
+  async function ensureSession() {
+    await ensureClient();
+    const { data } = await sb.auth.getSession();
+    if (data && data.session) return data.session;
+    const r = await sb.auth.signInWithPassword({ email: SC.authEmail, password: AUTHPW });
+    if (r.error) throw r.error; return r.data.session;
+  }
+  async function ensureNumber() {
+    if (ME.no) return;
+    const { data, error } = await sb.rpc('expo_next_user', { p_app: SYNC_APP });
+    if (error) throw error;
+    ME = { no: data, tmp: null }; await idbPut('kv', ME, 'me');
+    // 임시 번호로 적은 것들 → 진짜 번호로
+    for (const it of Object.values(ITEMS)) if (it.dirty && !it.by) { it.by = ME.no; await saveItem(it); }
+    for (const p of Object.values(PHOTOS)) if (p.dirty && !p.by) { p.by = ME.no; await savePhoto(p); }
+    for (const r of Object.values(RECS)) if (r.dirty && !r.by) { r.by = ME.no; await saveRec(r); }
+    if (chan) chan.track({ no: ME.no });
+    renderMe(); refreshView();
+  }
+  function subscribe() {
+    if (chan) return;
+    chan = sb.channel('expo-' + SYNC_APP, { config: { presence: { key: presenceKey } } });
+    const filt = 'app=eq.' + SYNC_APP;
+    chan.on('postgres_changes', { event: '*', schema: 'public', table: 'expo_items', filter: filt }, p => p.new && p.new.cid && applyItem(p.new).then(refreshView))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'expo_photos', filter: filt }, p => p.new && p.new.id && applyPhoto(p.new).then(refreshView))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'expo_recordings', filter: filt }, p => p.new && p.new.id && applyRec(p.new).then(refreshView))
+      .on('presence', { event: 'sync' }, () => {
+        const st = chan.presenceState(); const nos = new Set();
+        Object.values(st).forEach(arr => arr.forEach(m => { if (m.no) nos.add(m.no); }));
+        NET.peers = [...nos].sort((a, b) => a - b); renderNet();
+      })
+      .subscribe(async s => {
+        if (s === 'SUBSCRIBED') { NET.connected = true; renderNet(); if (ME.no) chan.track({ no: ME.no }); pullAll().then(() => kick(50)); }
+        else if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT' || s === 'CLOSED') { NET.connected = false; renderNet(); }
+      });
+  }
+  async function syncNow() {
+    clearTimeout(kickT);
+    if (!syncReady() || syncing || !navigator.onLine) { renderNet(); return; }
+    syncing = true;
+    try {
+      await ensureSession(); await ensureNumber(); subscribe();
+      await pushAll();
+      NET.lastSync = Date.now(); NET.err = '';
+    } catch (e) { NET.err = (e && (e.message || e.error_description)) || String(e); console.warn('sync', e); }
+    finally { syncing = false; renderNet(); }
+    if (dirtyCount()) { clearTimeout(loopT); loopT = setTimeout(syncNow, 5000); }
+  }
+  setInterval(() => { if (syncReady() && navigator.onLine && (dirtyCount() || !NET.connected)) syncNow(); }, 10000);
+
+  async function pushAll() {
+    for (const it of Object.values(ITEMS)) if (it.dirty) {
+      const ts = it.ts, by = it.by;
+      const { data, error } = await sb.rpc('expo_put_item', { p_app: SYNC_APP, p_cid: it.cid, p_field: it.field, p_value: await encText(it.v), p_ts: ts, p_by: by });
+      if (error) throw error;
+      const cur = ITEMS[key(it.cid, it.field)];
+      if (cur.ts === ts && cur.by === by) { if (data.ts === ts && data.by_no === by) { cur.dirty = false; await saveItem(cur); } else { cur.dirty = false; await applyItem(data, true); } }
+    }
+    for (const p of Object.values(PHOTOS)) if (p.dirty) await pushPhoto(p);
+    for (const r of Object.values(RECS)) if (r.dirty) await pushRec(r);
+    refreshView();
+  }
+  async function storagePut(path, u8) { const { error } = await sb.storage.from('expo').upload(path, new Blob([u8], { type: 'application/octet-stream' }), { contentType: 'application/octet-stream', upsert: true }); if (error) throw error; }
+  async function storageGet(path) { const { data, error } = await sb.storage.from('expo').download(path); if (error) throw error; return new Uint8Array(await data.arrayBuffer()); }
+  async function storageDel(paths) { paths = paths.filter(Boolean); if (!paths.length) return; const { error } = await sb.storage.from('expo').remove(paths); if (error) console.warn('remove', error); }
+  async function pushPhoto(p) {
+    const ts = p.ts;
+    if (!p.deleted && !p.path) { const path = `${SYNC_APP}/ph/${p.id}/${ts}.bin`; await storagePut(path, await encBytes(new Uint8Array(await p.blob.arrayBuffer()))); p.path = path; await savePhoto(p); }
+    const { data, error } = await sb.rpc('expo_put_photo', { p_id: p.id, p_app: SYNC_APP, p_cid: p.cid, p_kind: p.kind, p_path: p.deleted ? null : p.path, p_w: p.w || null, p_h: p.h || null, p_created: p.created, p_ts: ts, p_by: p.by, p_deleted: !!p.deleted });
+    if (error) throw error;
+    if (PHOTOS[p.id] !== p || p.ts !== ts) return;     // 그 사이 또 바뀜 → 다음 차례
+    const won = data.ts === ts && data.by_no === p.by;
+    if (won) { await storageDel(p.oldPaths || []); p.oldPaths = []; p.dirty = false; await savePhoto(p); }
+    else { if (p.path && p.path !== data.path) await storageDel([p.path]); p.dirty = false; p.path = null; await applyPhoto(data, true); }
+  }
+  async function pushRec(r) {
+    const ts = r.ts;
+    if (!r.deleted && !r.path && r.enc) { r.status = 'uploading'; renderRecsSoon(); const path = `${SYNC_APP}/rec/${r.id}/${ts}.bin`; await storagePut(path, new Uint8Array(await r.enc.arrayBuffer())); r.path = path; await saveRec(r); }
+    const { data, error } = await sb.rpc('expo_put_rec', { p_id: r.id, p_app: SYNC_APP, p_cid: r.cid, p_path: r.deleted ? null : r.path, p_mime: r.mime, p_duration: r.duration || null, p_size: r.size || null, p_created: r.created, p_ts: ts, p_by: r.by, p_deleted: !!r.deleted });
+    if (error) throw error;
+    if (RECS[r.id] !== r || r.ts !== ts) return;
+    if (data.ts === ts && data.by_no === r.by) { if (r.deleted) await storageDel([...(r.oldPaths || []), data.path, r.path]); r.dirty = false; await applyRec(data, true); }
+    else { r.dirty = false; await applyRec(data, true); }
+  }
+  async function pullAll() {
+    for (const [table, fn] of [['expo_items', applyItem], ['expo_photos', applyPhoto], ['expo_recordings', applyRec]]) {
+      const { data, error } = await sb.from(table).select('*').eq('app', SYNC_APP);
+      if (error) { NET.err = error.message; continue; }
+      for (const row of data) await fn(row);
+    }
+    NET.lastSync = Date.now(); refreshView(); renderNet();
+  }
+  async function applyItem(r, force) {
+    const k = key(r.cid, r.field), cur = ITEMS[k];
+    const remote = { ts: Number(r.ts), by: r.by_no };
+    if (!force && cur && !newer(remote, cur)) return;
+    let v; try { v = await decText(r.value_enc); } catch (e) { return; }
+    const it = ITEMS[k] = { cid: r.cid, field: r.field, v, ts: remote.ts, by: remote.by, dirty: false };
+    await saveItem(it); markChanged('item', r.cid, r.field);
+  }
+  async function applyPhoto(r, force) {
+    const cur = PHOTOS[r.id]; const remote = { ts: Number(r.ts), by: r.by_no };
+    if (!force && cur && !newer(remote, cur)) return;
+    if (cur && cur.dirty && !force && !newer(remote, cur)) return;
+    const p = Object.assign(cur || { id: r.id, oldPaths: [] }, { cid: r.cid, kind: r.kind, w: r.w, h: r.h, created: Number(r.created) || remote.ts, ts: remote.ts, by: remote.by, deleted: r.deleted, dirty: false });
+    if (r.deleted) { p.blob = null; p.path = null; }
+    else if (!cur || cur.path !== r.path || !cur.blob) {
+      try { p.blob = new Blob([await decBytes(await storageGet(r.path))], { type: 'image/jpeg' }); p.path = r.path; }
+      catch (e) { console.warn('photo get', e); if (!cur) return; }
+    }
+    PHOTOS[r.id] = p; await savePhoto(p); markChanged('photo', r.cid);
+  }
+  async function applyRec(r, force) {
+    const cur = RECS[r.id]; const remote = { ts: Number(r.ts), by: r.by_no };
+    const userSideNewer = !cur || newer(remote, cur) || force;
+    if (cur && cur.dirty && !userSideNewer) return;
+    const x = cur || { id: r.id, oldPaths: [] };
+    if (userSideNewer) Object.assign(x, { cid: r.cid, mime: r.mime, duration: r.duration_ms, size: r.size_bytes, created: Number(r.created) || remote.ts, ts: remote.ts, by: remote.by, deleted: r.deleted, path: r.path, dirty: false });
+    x.status = r.status; x.error = r.error || '';
+    try { x.transcript = r.transcript_enc ? await decText(r.transcript_enc) : ''; } catch (_) { x.transcript = ''; }
+    try { const s = r.summary_enc ? await decText(r.summary_enc) : ''; x.summary = s; } catch (_) { x.summary = ''; }
+    if (x.deleted) x.enc = null;
+    RECS[r.id] = x; await saveRec(x); markChanged('rec', r.cid);
+  }
+
+  /* ---------- 화면 공통 ---------- */
+  let ROUTE = '#list';
+  const CHANGED = new Set(); let refreshT = null;
+  function markChanged(kind, cid, f) { CHANGED.add(kind + ':' + cid + ':' + (f || '')); }
+  function refreshView() { clearTimeout(refreshT); refreshT = setTimeout(doRefresh, 120); }
+  function doRefresh() {
+    CHANGED.clear();
+    if (!DATA || !$('main')) return;
+    if (ROUTE.startsWith('#c/')) updateDetail(ROUTE.slice(3));
+    else if (ROUTE === '#report') updateReport();
+    else if (ROUTE === '#more') { /* 정적 */ }
+    else { const y = window.scrollY; renderList(); window.scrollTo(0, y); }
+    renderNet();
+  }
+  function showSaved() { const el = $('#saved'); if (el) el.textContent = lastSaved ? '저장됨 ' + hhmmss(new Date(lastSaved)) : '자동 저장'; }
+  function renderMe() { const el = $('#me'); if (el) el.textContent = ME.no ? '나: 사용자 ' + ME.no : '나: 임시 번호'; }
+  function renderNet() {
+    renderMe();
+    const el = $('#net'); if (!el) return;
+    const n = dirtyCount();
+    let cls = 'off', txt;
+    if (SC.kind !== 'supabase') txt = '이 기기에만 저장';
+    else if (!SKEY) txt = '함께 쓰기 꺼짐(비밀번호 필요)';
+    else if (!navigator.onLine) txt = `오프라인 · 보낼 것 ${n}건`;
+    else if (NET.connected) { cls = 'on'; txt = n ? `보내는 중 ${n}건` : '실시간 연결됨'; }
+    else txt = '연결 중…';
+    el.className = 'net ' + cls; el.textContent = txt;
+    const pe = $('#peers'); if (pe) pe.textContent = NET.connected && NET.peers.length ? '접속: ' + NET.peers.map(n => '사용자 ' + n).join(', ') : '';
+  }
+  function shell(title, back, body, nav) {
+    document.body.className = CFG.id;
+    document.body.innerHTML = `<div class="top">${back ? '<button class="back" id="back" aria-label="뒤로">‹</button>' : ''}<h1>${esc(title)}</h1><span class="saved" id="saved"></span></div>
+      <div class="who"><b id="me"></b><span id="net" class="net"></span><span id="peers" class="peers"></span></div>
+      <main>${body}</main>${nav || ''}<div class="toast" id="toast"></div><div id="print-root"></div>`;
+    if (back) $('#back').onclick = () => { location.hash = back; };
+    showSaved(); renderNet();
+    document.querySelectorAll('.nav button').forEach(b => b.onclick = () => { location.hash = b.dataset.go; });
+  }
+  const navBar = on => `<nav class="nav">${[['#list', '업체 목록'], ['#report', '보고서'], ['#more', '보내기·설정']].map(([h, t]) => `<button data-go="${h}" class="${on === h ? 'on' : ''}">${t}</button>`).join('')}</nav>`;
+  let toastT; function toast(msg) { const t = $('#toast'); if (!t) return; t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2400); }
+
+  /* ---------- 잠금 해제 ---------- */
+  async function unlockWith(pw) {
     const enc = await (await fetch('data.enc.json', { cache: 'no-cache' })).json();
-    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
-    const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64d(enc.salt), iterations: enc.iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
-    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(enc.iv) }, key, b64d(enc.ct));
-    return JSON.parse(new TextDecoder().decode(plain));
+    const k = await deriveAes(pw, b64d(enc.salt), enc.iter);
+    const data = JSON.parse(td.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(enc.iv) }, k, b64d(enc.ct))));
+    const skey = await deriveAes(pw, 'expo2026-sync-v1', 310000);
+    const authpw = await deriveHex(pw, 'expo2026-auth-v1', 310000);
+    await idbPut('kv', data, 'data'); await idbPut('kv', skey, 'skey'); await idbPut('kv', authpw, 'authpw');
+    DATA = data; SKEY = skey; AUTHPW = authpw;
   }
   function renderLock() {
     document.body.innerHTML = `<div class="top"><h1>${esc(CFG.title)}</h1></div>
     <div class="lock"><div class="sec"><h2>처음 한 번만 비밀번호를 넣어 주세요</h2>
-    <p class="small">업체 담당자 연락처가 들어 있어서 잠가 두었어요. 한 번 열면 이 폰에서는 다시 묻지 않아요.</p>
+    <p class="small">업체 담당자 연락처가 들어 있어서 잠가 두었어요. 한 번 열면 이 폰에서는 다시 묻지 않아요. 같은 링크를 연 사람끼리 기록이 실시간으로 함께 보여요.</p>
     <form id="lf"><input id="pw" type="password" autocomplete="current-password" placeholder="비밀번호" aria-label="비밀번호">
     <div class="err" id="lerr"></div><button class="btn big" id="lbtn">열기</button></form></div></div>`;
     $('#lf').onsubmit = async ev => {
       ev.preventDefault(); const b = $('#lbtn'); b.classList.add('busy'); b.textContent = '여는 중…'; $('#lerr').textContent = '';
-      try { DATA = await decrypt($('#pw').value.trim()); await idbPut('kv', DATA, 'data'); await start(); }
+      try { await unlockWith($('#pw').value.trim()); await start(); }
       catch (e) { $('#lerr').textContent = (e && e.name === 'OperationError') ? '비밀번호가 맞지 않아요.' : '열지 못했어요. 인터넷 연결을 확인해 주세요.'; b.classList.remove('busy'); b.textContent = '열기'; }
     };
   }
-
-  /* ---------- 화면 ---------- */
-  function shell(title, back, body, nav) {
-    document.body.className = CFG.id;
-    document.body.innerHTML = `<div class="top">${back ? '<button class="back" id="back" aria-label="뒤로">‹</button>' : ''}<h1>${esc(title)}</h1><span class="saved" id="saved"></span></div><main>${body}</main>${nav || ''}<div class="toast" id="toast"></div><div id="print-root"></div>`;
-    if (back) $('#back').onclick = () => { flush(); location.hash = back; };
-    showSaved();
-    document.querySelectorAll('.nav button').forEach(b => b.onclick = () => { flush(); location.hash = b.dataset.go; });
+  const upgradeBanner = () => (SC.kind === 'supabase' && !SKEY) ? `<form class="sec warnbox" id="upf"><b>새 기능: 함께 쓰기</b><p class="small">이 폰에 적어 둔 기록은 그대로 있어요. 다른 사람과 실시간으로 함께 보려면 비밀번호를 한 번만 다시 넣어 주세요.</p>
+      <input id="upw" type="password" placeholder="비밀번호" aria-label="비밀번호"><div class="err" id="uperr"></div><button class="btn big" id="upb">함께 쓰기 켜기</button></form>` : '';
+  function bindUpgrade() {
+    const f = $('#upf'); if (!f) return;
+    f.onsubmit = async ev => { ev.preventDefault(); const b = $('#upb'); b.classList.add('busy');
+      try { await unlockWith($('#upw').value.trim()); toast('함께 쓰기를 켰어요'); kick(50); route(); }
+      catch (e) { $('#uperr').textContent = (e && e.name === 'OperationError') ? '비밀번호가 맞지 않아요.' : '지금은 켤 수 없어요. 인터넷을 확인해 주세요.'; b.classList.remove('busy'); } };
   }
-  const navBar = on => `<nav class="nav">${[['#list', '업체 목록'], ['#report', '보고서'], ['#more', '보내기·백업']].map(([h, t]) => `<button data-go="${h}" class="${on === h ? 'on' : ''}">${t}</button>`).join('')}</nav>`;
-  let toastT; function toast(msg) { const t = $('#toast'); if (!t) return; t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2200); }
 
+  /* ---------- 목록 ---------- */
   function renderList() {
-    const cs = DATA.companies; const done = cs.filter(c => entry(c.id).visited).length;
+    const cs = DATA.companies;
+    const cnt = { none: 0, doing: 0, done: 0 }; cs.forEach(c => cnt[status(c.id)]++);
     const items = cs.map(c => {
-      const e = entry(c.id); const np = photosOf(c.id, 'photo').length, nc = photosOf(c.id, 'card').length;
-      const filled = ['answer', 'memo', 'met', 'followup'].filter(k => (e[k] || '').trim()).length;
-      return `<div class="card ${e.visited ? 'done' : ''}" data-id="${c.id}"><div class="crow"><div class="mark">${esc(c.mark)}</div>
+      const st = status(c.id), sit = item(c.id, 'status');
+      const np = photosOf(c.id, 'photo').length, nc = photosOf(c.id, 'card').length, nr = recsOf(c.id).length;
+      const filled = FIELDS.filter(f => (val(c.id, f) || '').trim()).length;
+      return `<div class="card st-${st}" data-id="${c.id}"><div class="crow"><div class="mark">${esc(c.mark)}</div>
       <div class="cmain" data-open="${c.id}"><div class="cname">${esc(c.name)}</div>${c.topic ? `<div class="ctopic">${esc(c.topic)}</div>` : ''}
       <span class="badge ${c.booth ? '' : 'none'}">${esc(c.booth || '부스 위치 미표기')}</span>
       <div class="cask">물어볼 것: ${esc(c.ask)}</div>
-      <div class="cstat">${e.visited ? '방문함 ' + (e.visitedAt ? hhmm(new Date(e.visitedAt)) : '') + ' · ' : ''}적은 칸 ${filled}/4 · 사진 ${np} · 명함 ${nc}</div></div>
-      <button class="chk ${e.visited ? 'on' : ''}" data-chk="${c.id}" aria-label="방문 체크">${e.visited ? '✓ 방문' : '방문<br>체크'}</button></div></div>`;
+      <div class="cstat">적은 칸 ${filled}/4 · 사진 ${np} · 명함 ${nc} · 녹음 ${nr}</div></div>
+      <div class="stcol"><button class="chk s-${st}" data-cyc="${c.id}" aria-label="방문 상태 바꾸기">${STATUS[st]}</button>${sit ? `<div class="mk">${esc(marker(sit))}</div>` : ''}</div></div></div>`;
     }).join('');
-    shell(CFG.title, null, `<div class="hint">${esc(DATA.headline)}</div>
-      <div class="prog"><span>방문 ${done} / ${cs.length}</span><span class="small">${esc(DATA.docNo)}</span></div><div class="bar"><i style="width:${cs.length ? done / cs.length * 100 : 0}%"></i></div>
+    shell(CFG.title, null, `${upgradeBanner()}<div class="hint">${esc(DATA.headline)}</div>
+      <div class="dash"><div class="d done"><b>${cnt.done}</b>완료</div><div class="d doing"><b>${cnt.doing}</b>방문중</div><div class="d none"><b>${cnt.none}</b>미방문</div></div>
+      <div class="bar"><i class="b-done" style="width:${cnt.done / cs.length * 100}%"></i><i class="b-doing" style="width:${cnt.doing / cs.length * 100}%"></i></div>
+      <div class="small" style="margin:-6px 2px 10px;text-align:right">${esc(DATA.docNo)} · 상태 버튼을 누르면 미방문 → 방문중 → 완료</div>
       <div id="cards">${items}</div>
       <details class="sec"><summary><b>자료 참고 사항</b></summary><ul class="small">${DATA.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul></details>`, navBar('#list'));
+    bindUpgrade();
     document.querySelectorAll('[data-open]').forEach(el => el.onclick = () => { location.hash = '#c/' + el.dataset.open; });
-    document.querySelectorAll('[data-chk]').forEach(el => el.onclick = () => { toggleVisit(el.dataset.chk); renderList(); });
+    document.querySelectorAll('[data-cyc]').forEach(el => el.onclick = () => { const cid = el.dataset.cyc; const nx = { none: 'doing', doing: 'done', done: 'none' }[status(cid)]; setField(cid, 'status', nx); renderList(); });
   }
-  function toggleVisit(cid) { const e = entry(cid); e.visited = !e.visited; e.visitedAt = e.visited ? Date.now() : 0; touchEntry(cid); }
 
+  /* ---------- 업체 상세 ---------- */
   function renderDetail(cid) {
     const c = DATA.companies.find(x => x.id === cid); if (!c) { location.hash = '#list'; return; }
-    const e = entry(cid);
     const contacts = c.contacts.length ? c.contacts.map(p => `<div class="contact"><div><b>${esc(p.name)}</b> <span class="small">${esc(p.role)}</span></div>${p.phone ? `<a class="tel" href="tel:${esc(p.phone.replace(/[^0-9+]/g, ''))}">📞 ${esc(p.phone)}</a>` : '<span class="small">번호 없음</span>'}</div>`).join('') : '<p class="small">명함 미수령 — 부스에서 담당자를 확인하세요.</p>';
-    const ta = (k, label, ph) => `<label class="f" for="f-${k}">${label}</label><textarea id="f-${k}" data-k="${k}" placeholder="${esc(ph)}">${esc(e[k])}</textarea>`;
+    const ta = (f, ph) => `<label class="f" for="f-${f}">${FIELD_LABEL[f]}</label><textarea id="f-${f}" data-f="${f}" placeholder="${esc(ph)}">${esc(val(cid, f))}</textarea><div class="mk" id="mk-${f}">${esc(marker(item(cid, f)))}</div>`;
     const photoBlock = (kind, label) => `<div class="sec"><h2>${label} <span class="small" id="cnt-${kind}"></span></h2>
       <div class="btns"><label class="btn sub">📷 찍기<input type="file" accept="image/*" capture="environment" data-kind="${kind}" hidden></label>
       <label class="btn sub">🖼 앨범에서<input type="file" accept="image/*" multiple data-kind="${kind}" hidden></label></div><div class="photos" id="ph-${kind}"></div></div>`;
     shell(c.mark + '. ' + c.name, '#list', `
-      <button class="visit ${e.visited ? 'on' : ''}" id="vbtn">${e.visited ? '✓ 방문했어요' + (e.visitedAt ? ' (' + hhmm(new Date(e.visitedAt)) + ')' : '') : '방문했으면 누르세요'}</button>
-      <div class="sec" style="margin-top:12px"><h2>${esc(c.topic || c.name)}</h2><span class="badge ${c.booth ? '' : 'none'}">${esc(c.booth || '부스 위치 미표기')}</span>
+      <div class="seg" id="seg">${Object.entries(STATUS).map(([k, t]) => `<button data-st="${k}">${t}</button>`).join('')}</div><div class="mk" id="mk-status" style="text-align:center"></div>
+      <div class="sec" style="margin-top:10px"><h2>${esc(c.topic || c.name)}</h2><span class="badge ${c.booth ? '' : 'none'}">${esc(c.booth || '부스 위치 미표기')}</span>
       <ul style="margin-top:8px">${c.bullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul>${c.extra ? `<p class="small">※ ${esc(c.extra)}</p>` : ''}</div>
-      <div class="sec"><h2>물어볼 것</h2><div class="ask">${esc(c.ask)}</div>${ta('answer', '받은 답변', '물어본 내용에 대한 답을 적어 주세요')}</div>
+      <div class="sec"><h2>물어볼 것</h2><div class="ask">${esc(c.ask)}</div>${ta('answer', '물어본 내용에 대한 답을 적어 주세요')}</div>
+      <div class="sec" id="recsec"></div>
       <div class="sec"><h2>담당자</h2>${contacts}</div>
-      <div class="sec">${ta('met', '만난 사람', '이름 · 직책 · 연락처')}${ta('memo', '자유 메모', '본 것, 들은 것, 느낀 점')}${ta('followup', '후속 조치', '누가 · 무엇을 · 언제까지')}</div>
+      <div class="sec">${ta('met', '직책 · 연락처 (이름은 적어도 되고 안 적어도 돼요)')}${ta('memo', '본 것, 들은 것, 느낀 점')}${ta('followup', '누가 · 무엇을 · 언제까지')}</div>
       ${photoBlock('photo', '현장 사진')}${photoBlock('card', '명함 사진')}`,
       `<div class="savebar"><button class="btn sub" id="prev">‹ 이전</button><button class="btn" id="savebtn">저장</button><button class="btn sub" id="next">다음 ›</button></div>`);
-    document.querySelectorAll('textarea[data-k]').forEach(t => t.addEventListener('input', () => { entry(cid)[t.dataset.k] = t.value; touchEntry(cid); }));
-    $('#vbtn').onclick = () => { toggleVisit(cid); renderDetail(cid); };
-    $('#savebtn').onclick = async () => { document.querySelectorAll('textarea[data-k]').forEach(t => { entry(cid)[t.dataset.k] = t.value; }); touchEntry(cid); await flush(); toast('저장했어요 ' + hhmmss(new Date())); };
+    document.querySelectorAll('textarea[data-f]').forEach(t => t.addEventListener('input', () => { const it = setField(cid, t.dataset.f, t.value); $('#mk-' + t.dataset.f).textContent = marker(it); }));
+    document.querySelectorAll('#seg [data-st]').forEach(b => b.onclick = () => { setField(cid, 'status', b.dataset.st); updateDetail(cid); });
+    $('#savebtn').onclick = async () => { await syncNow(); toast((navigator.onLine ? '저장했어요 ' : '이 기기에 저장했어요(연결되면 보내요) ') + hhmmss(new Date())); };
     const i = DATA.companies.indexOf(c);
-    $('#prev').onclick = () => { flush(); location.hash = i > 0 ? '#c/' + DATA.companies[i - 1].id : '#list'; };
-    $('#next').onclick = () => { flush(); location.hash = i < DATA.companies.length - 1 ? '#c/' + DATA.companies[i + 1].id : '#report'; };
+    $('#prev').onclick = () => { location.hash = i > 0 ? '#c/' + DATA.companies[i - 1].id : '#list'; };
+    $('#next').onclick = () => { location.hash = i < DATA.companies.length - 1 ? '#c/' + DATA.companies[i + 1].id : '#report'; };
     document.querySelectorAll('input[type=file][data-kind]').forEach(inp => inp.onchange = async () => {
-      const files = [...inp.files]; inp.value = ''; if (!files.length) return;
-      toast('사진 넣는 중…');
-      let ok = 0;
+      const files = [...inp.files]; inp.value = ''; if (!files.length) return; toast('사진 넣는 중…'); let ok = 0;
       for (const f of files) { try { await addPhoto(cid, inp.dataset.kind, f); ok++; } catch (err) { toast('사진 하나를 넣지 못했어요.'); } }
-      drawPhotos(cid); lastSaved = Date.now(); dirty = false; showSaved(); if (ok) toast(`사진 ${ok}장 저장했어요`);
+      drawPhotos(cid); if (ok) toast(`사진 ${ok}장 저장했어요`); kick(100);
     });
-    drawPhotos(cid);
+    PH_SIG = ''; REC_SIG = '';
+    updateDetail(cid);
+  }
+  let PH_SIG = '', REC_SIG = '';
+  function updateDetail(cid) {
+    for (const f of FIELDS) {
+      const t = $('#f-' + f); if (!t) continue; const it = item(cid, f);
+      const focusedDirty = document.activeElement === t && it && it.dirty;
+      if (!focusedDirty && t.value !== (it ? it.v : '')) t.value = it ? it.v : '';
+      $('#mk-' + f).textContent = marker(it);
+    }
+    const st = status(cid);
+    document.querySelectorAll('#seg [data-st]').forEach(b => b.className = b.dataset.st === st ? 'on s-' + st : '');
+    const ms = $('#mk-status'); if (ms) ms.textContent = item(cid, 'status') ? '상태 ' + marker(item(cid, 'status')) : '';
+    drawPhotos(cid); drawRecs(cid);
   }
   function drawPhotos(cid) {
+    const sig = photosOf(cid).map(p => p.id + p.ts + (p.blob ? 1 : 0) + p.kind + (p.dirty ? 'd' : '')).join();
+    if (sig === PH_SIG) return; PH_SIG = sig;
     for (const kind of ['photo', 'card']) {
       const box = $('#ph-' + kind); if (!box) continue; const list = photosOf(cid, kind);
       $('#cnt-' + kind).textContent = list.length ? list.length + '장' : '';
-      box.innerHTML = list.map(p => `<div class="ph"><img src="${urlOf(p)}" alt=""><button data-del="${p.id}" aria-label="사진 지우기">×</button></div>`).join('');
-      box.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => { if (!confirm('이 사진을 지울까요?')) return; await idbDel('photos', b.dataset.del); PHOTOS = PHOTOS.filter(p => p.id !== b.dataset.del); drawPhotos(cid); });
+      box.innerHTML = list.map(p => `<div class="phw"><div class="ph">${p.blob ? `<img src="${urlOf(p)}" alt="">` : '<span class="small">받는 중…</span>'}<button data-del="${p.id}" aria-label="사진 지우기">×</button></div>
+        <label class="rep-btn">바꾸기<input type="file" accept="image/*" data-rep="${p.id}" hidden></label><div class="mk">${esc(marker(p))}${p.dirty ? ' · 보낼 것' : ''}</div></div>`).join('');
+      box.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => { if (!confirm('이 사진을 지울까요? 다른 사람 화면에서도 지워져요.')) return; await deletePhoto(b.dataset.del); drawPhotos(cid); kick(100); });
+      box.querySelectorAll('[data-rep]').forEach(inp => inp.onchange = async () => { const f = inp.files[0]; inp.value = ''; if (!f) return; await replacePhoto(inp.dataset.rep, f); drawPhotos(cid); toast('사진을 바꿨어요'); kick(100); });
     }
   }
   async function resizeImage(file, max = 1600) {
@@ -202,80 +439,201 @@
     } finally { URL.revokeObjectURL(url); }
   }
   async function addPhoto(cid, kind, file) {
-    const r = await resizeImage(file);
-    const p = { id: cid + '-' + kind + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), cid, kind, blob: r.blob, w: r.w, h: r.h, created: Date.now() };
-    await idbPut('photos', p); PHOTOS.push(p); return p;
+    const r = await resizeImage(file); const now = Date.now();
+    const p = { id: cid + '-' + kind + '-' + rid(), cid, kind, blob: r.blob, w: r.w, h: r.h, created: now, ts: now, by: myBy(), path: null, deleted: false, dirty: true, oldPaths: [] };
+    PHOTOS[p.id] = p; await savePhoto(p); return p;
   }
+  async function deletePhoto(id) { const p = PHOTOS[id]; if (!p) return; if (p.path) p.oldPaths = [...(p.oldPaths || []), p.path]; Object.assign(p, { deleted: true, blob: null, path: null, ts: Date.now(), by: myBy(), dirty: true }); await savePhoto(p); }
+  async function replacePhoto(id, file) { const p = PHOTOS[id]; if (!p) return; const r = await resizeImage(file); if (p.path) p.oldPaths = [...(p.oldPaths || []), p.path]; Object.assign(p, { blob: r.blob, w: r.w, h: r.h, path: null, ts: Date.now(), by: myBy(), dirty: true, deleted: false }); await savePhoto(p); }
 
-  /* ---------- 보고서 ---------- */
-  const maskPhone = s => META.maskPhones ? String(s).replace(/01[016789][- .]?\d{3,4}[- .]?\d{4}/g, '010-****-****') : s;
-  function reportModel() {
-    return DATA.companies.map(c => ({ c, e: entry(c.id), photos: photosOf(c.id, 'photo'), cards: photosOf(c.id, 'card') }));
+  /* ---------- 녹음 ---------- */
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let RS = null, recTimer = null;
+  const fmtDur = ms => { const s = Math.round((ms || 0) / 1000); return pad(Math.floor(s / 60)) + ':' + pad(s % 60); };
+  function renderRecsSoon() { REC_SIG = ''; refreshView(); }
+  function parseSummary(s) { if (!s) return null; try { const o = JSON.parse(s); if (o && (o.topics || o.qa || o.actions)) return o; } catch (_) {} return { text: s }; }
+  function summaryHTML(o) {
+    if (!o) return '';
+    if (o.text) return `<div class="pre">${esc(o.text)}</div>`;
+    return `${(o.topics || []).map(t => `<div class="sumt">${esc(t.title)}</div><ul>${(t.lines || []).map(l => `<li>${esc(l)}</li>`).join('')}</ul>`).join('')}
+      ${(o.qa || []).length ? `<div class="sumt">문답</div>${o.qa.map(q => `<div class="qa"><b>Q.</b> ${esc(q.q)}<br><b>A.</b> ${esc(q.a)}</div>`).join('')}` : ''}
+      ${(o.actions || []).length ? `<div class="sumt">후속 조치</div><ul>${o.actions.map(a => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}`;
   }
+  function summaryText(o, r) {
+    if (!o) return ''; const L = [`[녹음 요약 ${r ? hhmm(new Date(r.created)) : ''}]`];
+    if (o.text) L.push(o.text);
+    else {
+      (o.topics || []).forEach(t => { L.push('■ ' + t.title); (t.lines || []).forEach(l => L.push('- ' + l)); });
+      (o.qa || []).forEach(q => L.push('Q. ' + q.q, 'A. ' + q.a));
+      if ((o.actions || []).length) { L.push('후속 조치:'); o.actions.forEach(a => L.push('- ' + a)); }
+    }
+    return L.join('\n');
+  }
+  function drawRecs(cid) {
+    const box = $('#recsec'); if (!box) return;
+    const list = recsOf(cid); const live = localStorage.getItem(LS + 'live') === '1';
+    const sig = (RS && RS.cid === cid ? 'R' : '') + live + list.map(r => [r.id, r.ts, r.status, r.dirty, (r.summary || '').length, (r.transcript || '').length, r.enc ? 1 : 0].join('/')).join() + '|' + val(cid, 'livedraft');
+    if (sig === REC_SIG) return; REC_SIG = sig;
+    const recording = RS && RS.cid === cid;
+    box.innerHTML = `<h2>녹음 <span class="small">${list.length ? list.length + '개' : ''}</span></h2>
+      <div class="notice">🎙 녹음 전 상대방에게 녹음 사실을 알려 주세요.</div>
+      <button class="btn big ${recording ? 'warn' : ''}" id="recbtn">${recording ? '■ 녹음 멈추기 ' + fmtDur(Date.now() - RS.start) : '● 녹음 시작'}</button>
+      ${SR ? `<label class="chkline"><input type="checkbox" id="livetg" ${live ? 'checked' : ''} ${recording ? 'disabled' : ''}> 실시간 초안(브라우저 받아쓰기, 선택)</label>` : '<p class="small">이 브라우저는 실시간 초안을 지원하지 않아요. 녹음만 하면 나중에 받아쓰기·요약이 돼요.</p>'}
+      ${recording && RS.sr ? `<div class="live" id="livebox">${esc(RS.draft)}<i>${esc(RS.interim || '')}</i></div>` : ''}
+      ${val(cid, 'livedraft') ? `<details class="sub"><summary>실시간 초안 <span class="mk">${esc(marker(item(cid, 'livedraft')))}</span></summary><div class="pre">${esc(val(cid, 'livedraft'))}</div><button class="btn sub" id="livetomemo">메모에 넣기</button></details>` : ''}
+      <div id="reclist">${list.map(r => {
+        const st = r.dirty && !r.path ? 'local' : r.status || 'pending'; const o = parseSummary(r.summary);
+        return `<div class="rec"><div class="rhead"><b>${hhmm(new Date(r.created))} · ${fmtDur(r.duration)}</b><span class="rst rs-${st}">${REC_STATUS[st] || st}</span></div>
+          <div class="mk">${esc(marker(r))}${r.error ? ' · 사유: ' + esc(r.error) : ''}</div>
+          <div class="btns"><button class="btn sub" data-play="${r.id}">▶ 듣기</button><button class="btn warn" data-rdel="${r.id}">지우기</button></div>
+          ${st === 'failed' ? `<button class="btn sub big" data-retry="${r.id}">다시 요청</button>` : ''}
+          <div id="aud-${r.id}"></div>
+          ${o ? `<div class="sumbox"><div class="sumh">녹음 요약</div>${summaryHTML(o)}<button class="btn" data-apply="${r.id}">메모에 넣기</button></div>` : ''}
+          ${r.transcript ? `<details class="sub"><summary>받아쓰기 원문</summary><div class="pre">${esc(r.transcript)}</div></details>` : ''}</div>`;
+      }).join('')}</div>`;
+    $('#recbtn').onclick = () => recording ? stopRec() : startRec(cid);
+    const lt = $('#livetg'); if (lt) lt.onchange = () => { localStorage.setItem(LS + 'live', lt.checked ? '1' : '0'); REC_SIG = ''; };
+    const lm = $('#livetomemo'); if (lm) lm.onclick = () => appendMemo(cid, '[실시간 초안]\n' + val(cid, 'livedraft'));
+    box.querySelectorAll('[data-play]').forEach(b => b.onclick = () => playRec(b.dataset.play));
+    box.querySelectorAll('[data-rdel]').forEach(b => b.onclick = async () => { if (!confirm('이 녹음을 지울까요? 받아쓰기·요약도 함께 지워지고, 다른 사람 화면에서도 사라져요.')) return; await deleteRec(b.dataset.rdel); REC_SIG = ''; drawRecs(cid); kick(100); });
+    box.querySelectorAll('[data-retry]').forEach(b => b.onclick = async () => { try { const { data, error } = await sb.rpc('expo_retry_rec', { p_id: b.dataset.retry }); if (error) throw error; await applyRec(data, false); REC_SIG = ''; drawRecs(cid); } catch (e) { toast('지금은 다시 요청할 수 없어요.'); } });
+    box.querySelectorAll('[data-apply]').forEach(b => b.onclick = () => { const r = RECS[b.dataset.apply]; appendMemo(cid, summaryText(parseSummary(r.summary), r)); });
+  }
+  function appendMemo(cid, text) {
+    const cur = val(cid, 'memo'); const it = setField(cid, 'memo', (cur ? cur.replace(/\s+$/, '') + '\n\n' : '') + text);
+    const t = $('#f-memo'); if (t) { t.value = it.v; $('#mk-memo').textContent = marker(it); t.scrollIntoView({ block: 'center' }); }
+    toast('메모에 넣었어요. 메모 칸에서 고칠 수 있어요.');
+  }
+  async function startRec(cid) {
+    if (RS) return;
+    if (!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('이 브라우저는 녹음을 지원하지 않아요.'); return; }
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }); }
+    catch (e) { toast('마이크를 쓸 수 없어요. 브라우저 설정에서 마이크를 허용해 주세요.'); return; }
+    const mime = ['audio/webm;codecs=opus', 'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm'].find(m => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || '';
+    let mr; try { mr = new MediaRecorder(stream, Object.assign({ audioBitsPerSecond: 24000 }, mime ? { mimeType: mime } : {})); } catch (_) { mr = new MediaRecorder(stream); }
+    RS = { cid, mr, chunks: [], start: Date.now(), stream, mime: mr.mimeType || mime || 'audio/webm', draft: '', interim: '', sr: null };
+    mr.ondataavailable = e => { if (e.data && e.data.size) RS && RS.chunks.push(e.data); };
+    mr.start(1000);
+    if (SR && localStorage.getItem(LS + 'live') === '1') startLive();
+    REC_SIG = ''; drawRecs(cid);
+    clearInterval(recTimer); recTimer = setInterval(() => { const b = $('#recbtn'); if (RS && b) b.textContent = '■ 녹음 멈추기 ' + fmtDur(Date.now() - RS.start); if (RS && Date.now() - RS.start > 60 * 60 * 1000) stopRec(); }, 500);
+  }
+  function startLive() {
+    try {
+      const sr = new SR(); sr.lang = 'ko-KR'; sr.continuous = true; sr.interimResults = true; RS.sr = sr;
+      sr.onresult = ev => { let interim = ''; for (let i = ev.resultIndex; i < ev.results.length; i++) { const t = ev.results[i][0].transcript; if (ev.results[i].isFinal) RS.draft += t.trim() + '\n'; else interim += t; } RS.interim = interim; const lb = $('#livebox'); if (lb) lb.innerHTML = esc(RS.draft) + '<i>' + esc(interim) + '</i>'; };
+      sr.onerror = ev => { if (['not-allowed', 'audio-capture', 'service-not-allowed'].includes(ev.error)) { RS && (RS.sr = null); localStorage.setItem(LS + 'live', '0'); toast('실시간 초안이 녹음과 함께 안 돼서 껐어요. 녹음은 계속돼요.'); } };
+      sr.onend = () => { if (RS && RS.sr === sr) { try { sr.start(); } catch (_) {} } };
+      sr.start();
+    } catch (e) { RS.sr = null; toast('실시간 초안을 켤 수 없어요. 녹음만 할게요.'); }
+  }
+  async function stopRec() {
+    if (!RS) return; const R = RS; clearInterval(recTimer);
+    if (R.sr) { const sr = R.sr; R.sr = null; try { sr.stop(); } catch (_) {} }
+    await new Promise(res => { R.mr.onstop = res; try { R.mr.stop(); } catch (_) { res(); } });
+    R.stream.getTracks().forEach(t => t.stop()); RS = null;
+    const blob = new Blob(R.chunks, { type: R.mime }); const now = Date.now();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const plain = !SKEY; const enc = plain ? bytes : await encBytes(bytes);
+    const r = { id: R.cid + '-rec-' + rid(), cid: R.cid, mime: R.mime, duration: now - R.start, size: enc.length, created: R.start, ts: now, by: myBy(), path: null, deleted: false, dirty: true, enc: new Blob([enc]), plain, status: 'local', transcript: '', summary: '', oldPaths: [] };
+    RECS[r.id] = r; await saveRec(r);
+    if (R.draft.trim()) { const cur = val(R.cid, 'livedraft'); setField(R.cid, 'livedraft', (cur ? cur + '\n---\n' : '') + `[${hhmm(new Date(R.start))}] ` + R.draft.trim()); }
+    toast(navigator.onLine ? '녹음을 저장했어요. 올리는 중…' : '녹음을 이 기기에 저장했어요. 연결되면 자동으로 올려요.');
+    REC_SIG = ''; drawRecs(R.cid); kick(100);
+  }
+  async function playRec(id) {
+    const r = RECS[id]; const box = $('#aud-' + id); if (!r || !box) return;
+    try {
+      let bytes;
+      if (r.enc) bytes = new Uint8Array(await r.enc.arrayBuffer());
+      else { if (!navigator.onLine) { toast('이 녹음은 인터넷이 될 때 들을 수 있어요.'); return; } await ensureSession(); bytes = await storageGet(r.path); r.enc = new Blob([bytes]); r.plain = false; await saveRec(r); }
+      const audio = r.plain ? bytes : await decBytes(bytes);
+      const u = URL.createObjectURL(new Blob([audio], { type: (r.mime || 'audio/webm').split(';')[0] }));
+      box.innerHTML = `<audio controls src="${u}" style="width:100%;margin-top:6px"></audio>`; box.querySelector('audio').play().catch(() => {});
+    } catch (e) { toast('녹음을 열지 못했어요.'); }
+  }
+  async function deleteRec(id) { const r = RECS[id]; if (!r) return; if (r.path) r.oldPaths = [...(r.oldPaths || []), r.path]; Object.assign(r, { deleted: true, enc: null, ts: Date.now(), by: myBy(), dirty: true }); await saveRec(r); }
+  // pushRec에서 평문 녹음(함께 쓰기 켜기 전) 암호화
+  const _pushRec = pushRec;
+  pushRec = async function (r) { if (r.plain && r.enc && SKEY) { r.enc = new Blob([await encBytes(new Uint8Array(await r.enc.arrayBuffer()))]); r.plain = false; await saveRec(r); } return _pushRec(r); };
+
+  /* ---------- 보고서 (사용자 번호 없음, 녹음 원문·파일 없음) ---------- */
+  const masked = () => localStorage.getItem(LS + 'mask') === '1';
+  const maskPhone = s => masked() ? String(s).replace(/01[016789][- .]?\d{3,4}[- .]?\d{4}/g, '010-****-****') : s;
+  const reportModel = () => DATA.companies.map(c => ({ c, st: status(c.id), v: f => val(c.id, f), photos: photosOf(c.id, 'photo').filter(p => p.blob), cards: photosOf(c.id, 'card').filter(p => p.blob), recs: recsOf(c.id).map(r => ({ r, o: parseSummary(r.summary) })).filter(x => x.o) }));
   const contactLine = c => c.contacts.length ? c.contacts.map(p => `${p.name} ${p.role}${p.phone ? ' ' + maskPhone(p.phone) : ''}`).join(' · ') : '명함 미수령';
-  function reportTitle() { return `KINTEX 스마트건설 EXPO 방문 보고서 — ${CFG.title}`; }
+  const reportTitle = () => `KINTEX 스마트건설 EXPO 방문 보고서 — ${CFG.title}`;
+  const visitDate = () => val('_meta', 'visitDate') || '2026-11-27';
+  const counts = m => { const c = { none: 0, doing: 0, done: 0 }; m.forEach(x => c[x.st]++); return c; };
   function reportHTML() {
-    const m = reportModel(); const done = m.filter(x => x.e.visited).length;
+    const m = reportModel(); const n = counts(m);
     const fig = (p, cap) => `<figure><img src="${urlOf(p)}" alt=""><figcaption>${cap}</figcaption></figure>`;
     const field = (lbl, v) => `<div><span class="lbl">${lbl}</span> <span class="pre">${esc(maskPhone(v || '').trim() || '—')}</span></div>`;
     return `<div class="rep" id="rep">
       <h1>${esc(reportTitle())}</h1>
-      <div class="rmeta">${COMPANY} · 방문일 ${esc(META.visitDate || '')} · 작성자 ${esc(META.writer || '—')} · 방문 ${done}/${m.length}곳 · 작성 ${esc(fmtTime(Date.now()))}</div>
+      <div class="rmeta">${COMPANY} · 방문일 ${esc(visitDate())} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${esc(fmtTime(Date.now()))}</div>
       <h2>1. 요약</h2>
-      <table><thead><tr><th style="width:8%">순서</th><th style="width:24%">업체</th><th style="width:10%">방문</th><th>후속 조치</th></tr></thead><tbody>
-      ${m.map(x => `<tr><td>${esc(x.c.mark)}</td><td>${esc(x.c.name)}</td><td>${x.e.visited ? '○' : '—'}</td><td class="pre">${esc(maskPhone(x.e.followup || '').trim() || '—')}</td></tr>`).join('')}</tbody></table>
-      <h2>2. 종합 의견</h2><div class="opinion">${esc(META.opinion.trim() || '—')}</div>
+      <table><thead><tr><th style="width:8%">순서</th><th style="width:24%">업체</th><th style="width:11%">상태</th><th>후속 조치</th></tr></thead><tbody>
+      ${m.map(x => `<tr><td>${esc(x.c.mark)}</td><td>${esc(x.c.name)}</td><td>${STATUS[x.st]}</td><td class="pre">${esc(maskPhone(x.v('followup')).trim() || '—')}</td></tr>`).join('')}</tbody></table>
+      <h2>2. 종합 의견</h2><div class="opinion">${esc(val('_meta', 'opinion').trim() || '—')}</div>
       <h2>3. 업체별 정리</h2>
-      ${m.map(x => `<div class="co"><h3>${esc(x.c.mark)}. ${esc(x.c.name)}${x.c.topic ? ' — ' + esc(x.c.topic) : ''} <span style="font-weight:400;color:#555">(${x.e.visited ? '방문' + (x.e.visitedAt ? ' ' + hhmm(new Date(x.e.visitedAt)) : '') : '미방문'}${x.c.booth ? ' · ' + esc(x.c.booth) : ''})</span></h3>
+      ${m.map(x => `<div class="co"><h3>${esc(x.c.mark)}. ${esc(x.c.name)}${x.c.topic ? ' — ' + esc(x.c.topic) : ''} <span style="font-weight:400;color:#555">(${STATUS[x.st]}${x.c.booth ? ' · ' + esc(x.c.booth) : ''})</span></h3>
         <div class="lbl">핵심 기술</div><ul>${x.c.bullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul>
-        ${field('물어볼 것:', x.c.ask)}${field('받은 답변:', x.e.answer)}${field('만난 사람:', x.e.met)}${field('메모:', x.e.memo)}${field('후속 조치:', x.e.followup)}
+        ${field('물어볼 것:', x.c.ask)}${field('받은 답변:', x.v('answer'))}${field('만난 사람:', x.v('met'))}${field('메모:', x.v('memo'))}${field('후속 조치:', x.v('followup'))}
+        ${x.recs.map(({ r, o }) => `<div class="rsum"><span class="lbl">녹음 요약 (${hhmm(new Date(r.created))}, ${fmtDur(r.duration)})</span>${summaryHTML(o)}</div>`).join('')}
         <div><span class="lbl">담당자(사전 자료):</span> ${esc(contactLine(x.c))}</div>
         ${x.photos.length || x.cards.length ? `<div class="rph">${x.photos.map((p, i) => fig(p, '현장 사진 ' + (i + 1))).join('')}${x.cards.map((p, i) => fig(p, '명함 ' + (i + 1))).join('')}</div>` : ''}
       </div>`).join('')}
     </div>`;
   }
+  function sumPlain(o) { return summaryText(o).split('\n').slice(1).join('\n'); }
   function reportText() {
-    const m = reportModel(); const L = [];
-    L.push('# ' + reportTitle(), '', `${COMPANY} · 방문일 ${META.visitDate || ''} · 작성자 ${META.writer || '-'} · 방문 ${m.filter(x => x.e.visited).length}/${m.length}곳 · 작성 ${fmtTime(Date.now())}`, '');
-    L.push('## 종합 의견', '', META.opinion.trim() || '-', '', '## 업체별 정리', '');
+    const m = reportModel(); const n = counts(m); const L = [];
+    L.push('# ' + reportTitle(), '', `${COMPANY} · 방문일 ${visitDate()} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${fmtTime(Date.now())}`, '');
+    L.push('## 종합 의견', '', val('_meta', 'opinion').trim() || '-', '', '## 업체별 정리', '');
     for (const x of m) {
-      L.push(`### ${x.c.mark}. ${x.c.name}${x.c.topic ? ' — ' + x.c.topic : ''}`, `- 방문: ${x.e.visited ? '방문함 ' + fmtTime(x.e.visitedAt) : '미방문'}`, `- 부스: ${x.c.booth || '미표기'}`, '- 핵심 기술:');
+      L.push(`### ${x.c.mark}. ${x.c.name}${x.c.topic ? ' — ' + x.c.topic : ''}`, `- 상태: ${STATUS[x.st]}`, `- 부스: ${x.c.booth || '미표기'}`, '- 핵심 기술:');
       x.c.bullets.forEach(b => L.push('  - ' + b));
-      L.push(`- 물어볼 것: ${x.c.ask}`, `- 받은 답변: ${maskPhone(x.e.answer.trim()) || '-'}`, `- 만난 사람: ${maskPhone(x.e.met.trim()) || '-'}`, `- 메모: ${maskPhone(x.e.memo.trim()) || '-'}`, `- 후속 조치: ${maskPhone(x.e.followup.trim()) || '-'}`, `- 담당자(사전 자료): ${contactLine(x.c)}`, `- 사진 ${x.photos.length}장 · 명함 ${x.cards.length}장`, '');
+      L.push(`- 물어볼 것: ${x.c.ask}`, `- 받은 답변: ${maskPhone(x.v('answer').trim()) || '-'}`, `- 만난 사람: ${maskPhone(x.v('met').trim()) || '-'}`, `- 메모: ${maskPhone(x.v('memo').trim()) || '-'}`, `- 후속 조치: ${maskPhone(x.v('followup').trim()) || '-'}`);
+      x.recs.forEach(({ r, o }) => L.push(`- 녹음 요약 (${hhmm(new Date(r.created))}, ${fmtDur(r.duration)}):`, ...sumPlain(o).split('\n').map(s => '  ' + s)));
+      L.push(`- 담당자(사전 자료): ${contactLine(x.c)}`, `- 사진 ${x.photos.length}장 · 명함 ${x.cards.length}장`, '');
     }
     return L.join('\n');
   }
   function csvText() {
     const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
-    const rows = [['순서', '업체', '주제', '부스', '방문', '방문 시각', '물어볼 것', '받은 답변', '만난 사람', '메모', '후속 조치', '사진 수', '명함 수', '담당자(사전 자료)']];
-    for (const x of reportModel()) rows.push([x.c.mark, x.c.name, x.c.topic, x.c.booth, x.e.visited ? '방문' : '미방문', fmtTime(x.e.visitedAt), x.c.ask, maskPhone(x.e.answer), maskPhone(x.e.met), maskPhone(x.e.memo), maskPhone(x.e.followup), x.photos.length, x.cards.length, contactLine(x.c)]);
+    const rows = [['순서', '업체', '주제', '부스', '상태', '물어볼 것', '받은 답변', '만난 사람', '메모', '후속 조치', '녹음 요약', '사진 수', '명함 수', '담당자(사전 자료)']];
+    for (const x of reportModel()) rows.push([x.c.mark, x.c.name, x.c.topic, x.c.booth, STATUS[x.st], x.c.ask, maskPhone(x.v('answer')), maskPhone(x.v('met')), maskPhone(x.v('memo')), maskPhone(x.v('followup')), x.recs.map(({ o }) => sumPlain(o)).join('\n---\n'), x.photos.length, x.cards.length, contactLine(x.c)]);
     return '\uFEFF' + rows.map(r => r.map(q).join(',')).join('\r\n') + '\r\n';
   }
   let docxP;
   function loadDocx() { return docxP || (docxP = new Promise((res, rej) => { if (window.docx) return res(window.docx); const s = document.createElement('script'); s.src = '../shared/docx.iife.js'; s.onload = () => res(window.docx); s.onerror = () => { docxP = null; rej(new Error('docx')); }; document.head.appendChild(s); })); }
   async function reportDocx() {
     const D = await loadDocx();
-    const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, ImageRun, AlignmentType, BorderStyle } = D;
+    const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, ImageRun, AlignmentType } = D;
     const P = (text, o = {}) => new Paragraph({ children: [new TextRun({ text, bold: o.bold, color: o.color, size: o.size })], spacing: { after: o.after == null ? 60 : o.after } });
-    const LP = (label, val) => { const lines = String(val || '-').split('\n'); return new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: label + ' ', bold: true, color: '1F3A5F' }), ...lines.flatMap((t, i) => i ? [new TextRun({ text: t, break: 1 })] : [new TextRun(t)])] }); };
+    const LP = (label, v) => { const lines = String(v || '-').split('\n'); return new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: label + ' ', bold: true, color: '1F3A5F' }), ...lines.map((t, i) => new TextRun(i ? { text: t, break: 1 } : t))] }); };
     const cell = (t, o = {}) => new TableCell({ width: o.w ? { size: o.w, type: WidthType.PERCENTAGE } : undefined, shading: o.head ? { fill: 'EEF2F7' } : undefined, children: String(t).split('\n').map(s => new Paragraph({ children: [new TextRun({ text: s, bold: o.head })] })) });
-    const m = reportModel(); const kids = [];
+    const m = reportModel(); const n = counts(m); const kids = [];
     kids.push(new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun({ text: reportTitle(), bold: true, size: 32 })] }));
-    kids.push(P(`${COMPANY} · 방문일 ${META.visitDate || ''} · 작성자 ${META.writer || '—'} · 방문 ${m.filter(x => x.e.visited).length}/${m.length}곳 · 작성 ${fmtTime(Date.now())}`, { color: '555555', after: 200 }));
+    kids.push(P(`${COMPANY} · 방문일 ${visitDate()} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${fmtTime(Date.now())}`, { color: '555555', after: 200 }));
     kids.push(new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun('1. 요약')] }));
-    kids.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [new TableRow({ tableHeader: true, children: [cell('순서', { head: 1, w: 8 }), cell('업체', { head: 1, w: 26 }), cell('방문', { head: 1, w: 10 }), cell('후속 조치', { head: 1, w: 56 })] }),
-      ...m.map(x => new TableRow({ children: [cell(x.c.mark), cell(x.c.name), cell(x.e.visited ? '○' : '—'), cell(maskPhone(x.e.followup || '').trim() || '—')] }))] }));
+    kids.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [new TableRow({ tableHeader: true, children: [cell('순서', { head: 1, w: 8 }), cell('업체', { head: 1, w: 26 }), cell('상태', { head: 1, w: 11 }), cell('후속 조치', { head: 1, w: 55 })] }),
+      ...m.map(x => new TableRow({ children: [cell(x.c.mark), cell(x.c.name), cell(STATUS[x.st]), cell(maskPhone(x.v('followup')).trim() || '—')] }))] }));
     kids.push(new Paragraph({ heading: HeadingLevel.HEADING_1, spacing: { before: 240 }, children: [new TextRun('2. 종합 의견')] }));
-    String(META.opinion.trim() || '—').split('\n').forEach(t => kids.push(P(t)));
+    String(val('_meta', 'opinion').trim() || '—').split('\n').forEach(t => kids.push(P(t)));
     kids.push(new Paragraph({ heading: HeadingLevel.HEADING_1, spacing: { before: 240 }, children: [new TextRun('3. 업체별 정리')] }));
     for (const x of m) {
-      kids.push(new Paragraph({ heading: HeadingLevel.HEADING_2, spacing: { before: 200 }, children: [new TextRun(`${x.c.mark}. ${x.c.name}${x.c.topic ? ' — ' + x.c.topic : ''}`), new TextRun({ text: `  (${x.e.visited ? '방문' + (x.e.visitedAt ? ' ' + hhmm(new Date(x.e.visitedAt)) : '') : '미방문'}${x.c.booth ? ' · ' + x.c.booth : ''})`, color: '666666', size: 20 })] }));
+      kids.push(new Paragraph({ heading: HeadingLevel.HEADING_2, spacing: { before: 200 }, children: [new TextRun(`${x.c.mark}. ${x.c.name}${x.c.topic ? ' — ' + x.c.topic : ''}`), new TextRun({ text: `  (${STATUS[x.st]}${x.c.booth ? ' · ' + x.c.booth : ''})`, color: '666666', size: 20 })] }));
       kids.push(P('핵심 기술', { bold: true, color: '1F3A5F', after: 20 }));
       x.c.bullets.forEach(b => kids.push(new Paragraph({ bullet: { level: 0 }, children: [new TextRun(b)] })));
-      kids.push(LP('물어볼 것:', x.c.ask), LP('받은 답변:', maskPhone(x.e.answer.trim()) || '—'), LP('만난 사람:', maskPhone(x.e.met.trim()) || '—'), LP('메모:', maskPhone(x.e.memo.trim()) || '—'), LP('후속 조치:', maskPhone(x.e.followup.trim()) || '—'), LP('담당자(사전 자료):', contactLine(x.c)));
+      kids.push(LP('물어볼 것:', x.c.ask), LP('받은 답변:', maskPhone(x.v('answer').trim()) || '—'), LP('만난 사람:', maskPhone(x.v('met').trim()) || '—'), LP('메모:', maskPhone(x.v('memo').trim()) || '—'), LP('후속 조치:', maskPhone(x.v('followup').trim()) || '—'));
+      x.recs.forEach(({ r, o }) => kids.push(LP(`녹음 요약 (${hhmm(new Date(r.created))}, ${fmtDur(r.duration)}):`, sumPlain(o))));
+      kids.push(LP('담당자(사전 자료):', contactLine(x.c)));
       const imgs = [...x.photos.map((p, i) => [p, '현장 사진 ' + (i + 1)]), ...x.cards.map((p, i) => [p, '명함 ' + (i + 1)])];
       for (const [p, cap] of imgs) {
-        const buf = await p.blob.arrayBuffer(); const W = 300; const s = Math.min(W / p.w, 220 / p.h);
+        const buf = await p.blob.arrayBuffer(); const s = Math.min(300 / p.w, 220 / p.h);
         kids.push(new Paragraph({ alignment: AlignmentType.LEFT, children: [new ImageRun({ type: 'jpg', data: new Uint8Array(buf), transformation: { width: Math.round(p.w * s), height: Math.round(p.h * s) } })] }));
         kids.push(P(cap, { color: '666666', size: 18 }));
       }
@@ -286,106 +644,123 @@
   }
   function fileStamp() { const d = new Date(); return `${ymd(d).replace(/-/g, '')}_${pad(d.getHours())}${pad(d.getMinutes())}`; }
   const baseName = () => `EXPO방문_${CFG.id === 'p1' ? '1순위' : '2순위'}_${fileStamp()}`;
-
   async function deliver(blob, name, how) {
     if (how === 'share') {
       const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e && e.name === 'AbortError') return; }
-      } else toast('이 폰에서는 바로 보내기가 안 돼서 파일로 저장할게요.');
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+      else toast('이 폰에서는 바로 보내기가 안 돼서 파일로 저장할게요.');
     }
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000); toast('파일을 저장했어요: ' + name);
   }
-
   function renderReport() {
     shell('보고서 · ' + CFG.title, null, `
       <div class="sec"><h2>보고서 정보</h2>
-        <label class="f" for="m-writer">작성자</label><input type="text" id="m-writer" data-m="writer" value="${esc(META.writer)}" placeholder="이름">
-        <label class="f" for="m-date">방문일</label><input type="date" id="m-date" data-m="visitDate" value="${esc(META.visitDate)}">
-        <label class="f" for="m-op">종합 의견</label><textarea id="m-op" data-m="opinion" style="min-height:140px" placeholder="전체적으로 본 것, 우선 협력 대상, 다음에 할 일">${esc(META.opinion)}</textarea>
-        <label class="chkline"><input type="checkbox" id="m-mask" ${META.maskPhones ? 'checked' : ''}> 보고서에서 전화번호 가리기</label>
+        <label class="f" for="m-visitDate">방문일</label><input type="date" id="m-visitDate" data-m="visitDate" value="${esc(visitDate())}"><div class="mk" id="mk-m-visitDate"></div>
+        <label class="f" for="m-opinion">종합 의견 <span class="small">(함께 쓰는 칸)</span></label><textarea id="m-opinion" data-m="opinion" style="min-height:140px" placeholder="전체적으로 본 것, 우선 협력 대상, 다음에 할 일">${esc(val('_meta', 'opinion'))}</textarea><div class="mk" id="mk-m-opinion"></div>
+        <label class="chkline"><input type="checkbox" id="m-mask" ${masked() ? 'checked' : ''}> 보고서에서 전화번호 가리기</label>
       </div>
       <div class="sec"><h2>보고서 만들기</h2>
         <div class="btns one"><button class="btn big" id="r-print">🖨 인쇄 · PDF로 저장 (A4)</button></div>
         <div class="btns"><button class="btn sub" id="r-docx-s">워드 보내기</button><button class="btn sub" id="r-docx">워드(DOCX) 받기</button>
         <button class="btn sub" id="r-txt-s">텍스트 보내기</button><button class="btn sub" id="r-txt">텍스트 받기</button></div>
-        <p class="small">PDF: 인쇄 화면에서 ‘PDF로 저장’을 고르세요. 아래는 미리보기예요.</p></div>
+        <p class="small">PDF: 인쇄 화면에서 ‘PDF로 저장’을 고르세요. 아래는 미리보기예요. 녹음 원문과 녹음 파일은 보고서에 넣지 않아요.</p></div>
       <div class="rep-wrap" id="preview"></div>`, navBar('#report'));
-    const redraw = () => { $('#preview').innerHTML = reportHTML(); };
-    document.querySelectorAll('[data-m]').forEach(el => el.addEventListener('input', () => { META[el.dataset.m] = el.value; touchMeta(); clearTimeout(el._t); el._t = setTimeout(redraw, 400); }));
-    $('#m-mask').onchange = ev => { META.maskPhones = ev.target.checked; touchMeta(); redraw(); };
-    $('#r-print').onclick = async () => { await flush(); const pr = $('#print-root'); pr.innerHTML = reportHTML(); document.body.classList.add('printing'); await waitImages(pr); window.print(); };
-    window.onafterprint = () => { document.body.classList.remove('printing'); $('#print-root').innerHTML = ''; };
-    const doDocx = how => async ev => { const b = ev.currentTarget; b.classList.add('busy'); try { await flush(); await deliver(await reportDocx(), baseName() + '_보고서.docx', how); } catch (e) { console.error(e); toast('워드 파일을 만들지 못했어요.'); } b.classList.remove('busy'); };
+    document.querySelectorAll('[data-m]').forEach(el => el.addEventListener('input', () => { const it = setField('_meta', el.dataset.m, el.value); $('#mk-m-' + el.dataset.m).textContent = marker(it); clearTimeout(el._t); el._t = setTimeout(() => { $('#preview').innerHTML = reportHTML(); }, 400); }));
+    $('#m-mask').onchange = ev => { localStorage.setItem(LS + 'mask', ev.target.checked ? '1' : '0'); $('#preview').innerHTML = reportHTML(); };
+    $('#r-print').onclick = async () => { const pr = $('#print-root'); pr.innerHTML = reportHTML(); document.body.classList.add('printing'); await waitImages(pr); window.print(); };
+    window.onafterprint = () => { document.body.classList.remove('printing'); const pr = $('#print-root'); if (pr) pr.innerHTML = ''; };
+    const doDocx = how => async ev => { const b = ev.currentTarget; b.classList.add('busy'); try { await deliver(await reportDocx(), baseName() + '_보고서.docx', how); } catch (e) { console.error(e); toast('워드 파일을 만들지 못했어요.'); } b.classList.remove('busy'); };
     $('#r-docx').onclick = doDocx('save'); $('#r-docx-s').onclick = doDocx('share');
     $('#r-txt').onclick = () => deliver(new Blob([reportText()], { type: 'text/markdown;charset=utf-8' }), baseName() + '_보고서.md', 'save');
     $('#r-txt-s').onclick = () => deliver(new Blob([reportText()], { type: 'text/plain;charset=utf-8' }), baseName() + '_보고서.txt', 'share');
-    redraw();
+    updateReport(true);
+  }
+  function updateReport(force) {
+    for (const f of ['visitDate', 'opinion']) {
+      const el = $('#m-' + f); if (!el) continue; const it = item('_meta', f);
+      if (!(document.activeElement === el && it && it.dirty) && it && el.value !== it.v) el.value = it.v;
+      $('#mk-m-' + f).textContent = marker(it);
+    }
+    const pv = $('#preview'); if (pv) pv.innerHTML = reportHTML();
   }
   function waitImages(root) { return Promise.all([...root.querySelectorAll('img')].map(i => i.complete ? 0 : new Promise(r => { i.onload = i.onerror = r; }))); }
 
   /* ---------- 백업 ---------- */
-  const blobToB64 = b => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(b); });
+  const blobToB64 = async b => b64e(new Uint8Array(await b.arrayBuffer()));
   async function backupBlob() {
-    await flush();
-    const photos = []; for (const p of PHOTOS) photos.push({ id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, created: p.created, type: p.blob.type || 'image/jpeg', b64: await blobToB64(p.blob) });
-    const obj = { kind: 'expo-visit-backup', version: 1, app: CFG.id, title: CFG.title, exportedAt: new Date().toISOString(), meta: META, entries: ENT, photos };
+    const photos = []; for (const p of Object.values(PHOTOS)) photos.push(Object.assign(photoRec(p), { blob: undefined, b64: p.blob ? await blobToB64(p.blob) : null }));
+    const recs = []; for (const r of Object.values(RECS)) recs.push(Object.assign(recRec(r), { enc: undefined, b64: r.enc ? await blobToB64(r.enc) : null }));
+    const obj = { kind: 'expo-visit-backup', version: 2, app: CFG.id, title: CFG.title, exportedAt: new Date().toISOString(), items: Object.values(ITEMS), photos, recs };
     return new Blob([JSON.stringify(obj)], { type: 'application/json' });
   }
   async function importBackup(file) {
     let obj; try { obj = JSON.parse(await file.text()); } catch (_) { throw new Error('파일을 읽지 못했어요.'); }
     if (!obj || obj.kind !== 'expo-visit-backup') throw new Error('방문 기록 백업 파일이 아니에요.');
     if (obj.app !== CFG.id) throw new Error(`다른 앱(${obj.title || obj.app})의 백업이에요. 맞는 링크에서 불러와 주세요.`);
-    if (!confirm(`백업(${obj.exportedAt ? fmtTime(obj.exportedAt) : ''})을 불러오면 이 기기의 기록이 백업 내용으로 바뀌어요. 계속할까요?`)) return false;
-    await idbClear('entries'); await idbClear('photos');
-    for (const k of Object.keys(ENT)) delete ENT[k];
-    for (const [cid, e] of Object.entries(obj.entries || {})) { ENT[cid] = Object.assign(blankEntry(), e); await idbPut('entries', ENT[cid], cid); try { localStorage.setItem(LS + 'e-' + cid, JSON.stringify(ENT[cid])); } catch (_) {} }
-    META = Object.assign({ opinion: '', writer: '', visitDate: '2026-11-27', maskPhones: false }, obj.meta || {}); await idbPut('kv', META, 'meta'); try { localStorage.setItem(LS + 'meta', JSON.stringify(META)); } catch (_) {}
-    urls.forEach(u => URL.revokeObjectURL(u)); urls.clear(); PHOTOS = [];
-    for (const p of obj.photos || []) { const blob = new Blob([b64d(p.b64)], { type: p.type || 'image/jpeg' }); const rec = { id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, created: p.created, blob }; await idbPut('photos', rec); PHOTOS.push(rec); }
-    lastSaved = Date.now(); dirty = false; return true;
+    if (!confirm('백업 내용을 합칠까요? 같은 칸은 더 나중에 고친 쪽이 남아요.')) return false;
+    let items = obj.items || [];
+    if (obj.version === 1) { items = []; for (const [cid, e] of Object.entries(obj.entries || {})) { if (e.visited) items.push({ cid, field: 'status', v: 'done', ts: e.visitedAt || e.updatedAt, by: 0 }); FIELDS.forEach(f => e[f] && items.push({ cid, field: f, v: e[f], ts: e.updatedAt, by: 0 })); } if (obj.meta && obj.meta.opinion) items.push({ cid: '_meta', field: 'opinion', v: obj.meta.opinion, ts: obj.meta.updatedAt || Date.now(), by: 0 }); }
+    for (const it of items) { if (newer(it, item(it.cid, it.field))) { const x = Object.assign({}, it, { dirty: true, by: it.by || myBy() }); ITEMS[key(it.cid, it.field)] = x; await saveItem(x); } }
+    for (const p of obj.photos || []) { const cur = PHOTOS[p.id]; const pts = { ts: p.ts || p.created, by: p.by || 0 }; if (!cur || newer(pts, cur)) { const x = Object.assign({}, p, { ts: pts.ts, by: pts.by || myBy(), blob: p.b64 ? new Blob([b64d(p.b64)], { type: p.type || 'image/jpeg' }) : null, path: null, oldPaths: [], dirty: true, deleted: !!p.deleted }); delete x.b64; PHOTOS[x.id] = x; await savePhoto(x); } }
+    for (const r of obj.recs || []) { if (!RECS[r.id] || newer(r, RECS[r.id])) { const x = Object.assign({}, r, { enc: r.b64 ? new Blob([b64d(r.b64)]) : null, path: r.b64 ? null : r.path, dirty: true }); delete x.b64; RECS[x.id] = x; await saveRec(x); } }
+    kick(100); return true;
   }
   function renderMore() {
-    const np = PHOTOS.length;
-    shell('보내기 · 백업', null, `
-      <div class="sec"><h2>업체별 정리본</h2><p class="small">사진은 빠지고 글만 들어가요.</p>
+    const np = photosOf ? Object.values(PHOTOS).filter(p => !p.deleted).length : 0, nr = Object.values(RECS).filter(r => !r.deleted).length;
+    shell('보내기 · 설정', null, `${upgradeBanner()}
+      <div class="sec"><h2>내 번호와 함께 쓰기</h2>
+        <p>${ME.no ? `이 기기는 <b>사용자 ${ME.no}</b>예요. 번호는 바뀌지 않아요.` : '아직 번호가 없어요. 인터넷에 연결되면 자동으로 정해져요(그 전에 적은 것은 임시 번호로 표시돼요).'}</p>
+        <p class="small">같은 링크를 연 사람끼리 실시간으로 함께 써요. 같은 칸을 둘이 고치면 더 나중에 고친 내용이 남고, 다른 칸은 둘 다 남아요. 인터넷이 끊겨도 이 기기에 저장되고, 다시 연결되면 자동으로 보내요.</p>
+        <button class="btn sub big" id="syncnow">지금 맞추기</button><p class="small" id="syncinfo"></p></div>
+      <div class="sec"><h2>업체별 정리본</h2><p class="small">사진·녹음은 빠지고 글만 들어가요.</p>
         <div class="btns"><button class="btn sub" id="x-txt-s">텍스트 보내기</button><button class="btn sub" id="x-txt">텍스트 받기</button>
         <button class="btn sub" id="x-csv-s">엑셀(CSV) 보내기</button><button class="btn sub" id="x-csv">엑셀(CSV) 받기</button></div></div>
-      <div class="sec"><h2>전체 백업 (사진 ${np}장 포함)</h2>
-        <p class="small">다른 폰이나 PC에서 이어서 쓰거나 사장님께 넘길 때 써요. 카톡 등으로 보내고, 받은 쪽에서 같은 링크를 연 뒤 ‘백업 불러오기’를 누르면 돼요. 실시간으로 함께 고쳐지지는 않아요.</p>
+      <div class="sec"><h2>전체 백업 (사진 ${np}장 · 녹음 ${nr}개 포함)</h2>
+        <p class="small">서버와 별개로 손에 들고 있는 사본이에요. 카톡 등으로 보내 두거나, 다른 기기에서 ‘백업 불러오기’로 합칠 수 있어요.</p>
         <div class="btns"><button class="btn" id="b-share">백업 보내기</button><button class="btn sub" id="b-save">백업 파일 받기</button></div>
         <div class="btns one"><label class="btn sub">📂 백업 불러오기<input type="file" id="b-imp" accept=".json,application/json" hidden></label></div></div>
-      <div class="sec"><h2>이 기기 정리</h2><p class="small">행사가 끝나고 백업을 받은 뒤에만 쓰세요.</p><button class="btn warn big" id="wipe">이 기기의 기록·잠금 해제 모두 지우기</button></div>
-      <p class="small" style="text-align:center">${COMPANY} · ${esc(DATA.docNo)} · 모든 기록은 이 기기 안에만 저장돼요</p>`, navBar('#more'));
+      <div class="sec"><h2>이 기기 정리</h2><p class="small">행사가 끝난 뒤에만 쓰세요. 서버의 함께 쓴 기록은 지워지지 않아요.</p><button class="btn warn big" id="wipe">이 기기의 기록·잠금 해제 지우기</button></div>
+      <p class="small" style="text-align:center">${COMPANY} · ${esc(DATA.docNo)} · 버전 ${esc(window.APP_VERSION || '')}</p>`, navBar('#more'));
+    bindUpgrade();
+    $('#syncinfo').textContent = NET.lastSync ? '마지막으로 맞춘 시각 ' + hhmmss(new Date(NET.lastSync)) + (NET.err ? ' · 문제: ' + NET.err : '') : (NET.err ? '문제: ' + NET.err : '');
+    $('#syncnow').onclick = async () => { await syncNow(); if (sb && NET.connected) await pullAll(); $('#syncinfo').textContent = '마지막으로 맞춘 시각 ' + hhmmss(new Date()) + (NET.err ? ' · 문제: ' + NET.err : ''); };
     const txt = () => new Blob([reportText()], { type: 'text/plain;charset=utf-8' });
     const csv = () => new Blob([csvText()], { type: 'text/csv;charset=utf-8' });
-    $('#x-txt').onclick = async () => { await flush(); deliver(txt(), baseName() + '_정리본.txt', 'save'); };
-    $('#x-txt-s').onclick = async () => { await flush(); deliver(txt(), baseName() + '_정리본.txt', 'share'); };
-    $('#x-csv').onclick = async () => { await flush(); deliver(csv(), baseName() + '_정리본.csv', 'save'); };
-    $('#x-csv-s').onclick = async () => { await flush(); deliver(csv(), baseName() + '_정리본.csv', 'share'); };
+    $('#x-txt').onclick = () => deliver(txt(), baseName() + '_정리본.txt', 'save');
+    $('#x-txt-s').onclick = () => deliver(txt(), baseName() + '_정리본.txt', 'share');
+    $('#x-csv').onclick = () => deliver(csv(), baseName() + '_정리본.csv', 'save');
+    $('#x-csv-s').onclick = () => deliver(csv(), baseName() + '_정리본.csv', 'share');
     const bk = how => async ev => { const b = ev.currentTarget; b.classList.add('busy'); try { await deliver(await backupBlob(), baseName() + '_백업.json', how); } catch (e) { toast('백업을 만들지 못했어요.'); } b.classList.remove('busy'); };
     $('#b-share').onclick = bk('share'); $('#b-save').onclick = bk('save');
-    $('#b-imp').onchange = async ev => { const f = ev.target.files[0]; ev.target.value = ''; if (!f) return; try { if (await importBackup(f)) { toast('백업을 불러왔어요'); setTimeout(() => { location.hash = '#list'; route(); }, 600); } } catch (e) { toast(e.message || '불러오지 못했어요.'); } };
-    $('#wipe').onclick = async () => { if (!confirm('정말 모두 지울까요? 되돌릴 수 없어요.')) return; await idbClear('entries'); await idbClear('photos'); await idbClear('kv'); Object.keys(localStorage).filter(k => k.startsWith(LS)).forEach(k => localStorage.removeItem(k)); location.hash = ''; location.reload(); };
+    $('#b-imp').onchange = async ev => { const f = ev.target.files[0]; ev.target.value = ''; if (!f) return; try { if (await importBackup(f)) { toast('백업을 합쳤어요'); setTimeout(() => { location.hash = '#list'; }, 600); } } catch (e) { toast(e.message || '불러오지 못했어요.'); } };
+    $('#wipe').onclick = async () => { if (!confirm('이 기기의 기록을 지울까요? 아직 보내지 못한 것은 사라져요.')) return; for (const s of ['items', 'photos', 'recs', 'kv', 'entries']) await idbClear(s); Object.keys(localStorage).filter(k => k.startsWith(LS) || k.startsWith('expo2026-auth')).forEach(k => localStorage.removeItem(k)); location.hash = ''; location.reload(); };
   }
 
-  /* ---------- 라우팅 ---------- */
+  /* ---------- 라우팅·시작 ---------- */
   function route() {
-    const h = location.hash || '#list';
-    window.scrollTo(0, 0);
+    const h = location.hash || '#list'; ROUTE = h; window.scrollTo(0, 0);
+    if (RS && !(h === '#c/' + RS.cid)) toast('녹음은 계속되고 있어요. 업체 화면에서 멈출 수 있어요.');
     if (h.startsWith('#c/')) renderDetail(decodeURIComponent(h.slice(3)));
     else if (h === '#report') renderReport();
     else if (h === '#more') renderMore();
-    else renderList();
+    else { ROUTE = '#list'; renderList(); }
   }
-  async function start() { await loadAll(); window.addEventListener('hashchange', route); route(); }
+  let started = false;
+  async function start() {
+    if (started) return; started = true;
+    await loadLocal(); window.addEventListener('hashchange', route); route(); kick(50);
+  }
   async function boot() {
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update().catch(() => {}); setInterval(() => reg.update().catch(() => {}), 15 * 60 * 1000); }).catch(() => {});
+      let reloaded = false; const hadCtl = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.addEventListener('controllerchange', () => { if (!hadCtl || reloaded || RS) return; reloaded = true; location.reload(); });
+    }
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     try { DATA = await idbGet('kv', 'data'); } catch (_) { DATA = null; }
     if (DATA && DATA.app === CFG.id) start(); else renderLock();
   }
-  window.__expo = { flush, state: () => ({ ENT, META, nPhotos: PHOTOS.length, photos: PHOTOS.map(p => ({ id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, size: p.blob.size })) }) };
+  window.__expo = { syncNow, pullAll, state: () => ({ me: ME, net: Object.assign({}, NET), dirty: dirtyCount(), items: Object.values(ITEMS).map(x => ({ cid: x.cid, field: x.field, v: x.v, ts: x.ts, by: x.by, dirty: x.dirty })), photos: Object.values(PHOTOS).map(p => ({ id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, ts: p.ts, by: p.by, path: p.path, deleted: p.deleted, dirty: p.dirty, hasBlob: !!p.blob, size: p.blob ? p.blob.size : 0 })), recs: Object.values(RECS).map(r => ({ id: r.id, cid: r.cid, status: r.status, path: r.path, deleted: r.deleted, dirty: r.dirty, size: r.size, mime: r.mime, duration: r.duration, hasSummary: !!r.summary, hasTranscript: !!r.transcript })) }) };
   boot();
 })();

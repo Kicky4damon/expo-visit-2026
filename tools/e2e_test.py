@@ -29,7 +29,7 @@ def download(page, selector):
     dl = d.value; path = os.path.join(DL, dl.suggested_filename); dl.save_as(path); return path
 
 def unlock(page, app, wrong_first=False):
-    page.goto(f'{BASE}/{app}/', wait_until='domcontentloaded')
+    page.goto(f'{BASE}/{app}/?ns=test', wait_until='domcontentloaded')
     page.wait_for_selector('#pw', timeout=20000)
     if wrong_first:
         page.fill('#pw', 'wrong-password-123'); page.click('#lbtn')
@@ -44,24 +44,24 @@ with sync_playwright() as p:
         ctx = br.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2, is_mobile=True, has_touch=True, locale='ko-KR', timezone_id='Asia/Seoul', accept_downloads=True, service_workers='allow')
         page = ctx.new_page(); errs = []
         page.on('pageerror', lambda e: errs.append(str(e)))
-        page.goto(f'{BASE}/{app}/'); page.wait_for_selector('#pw', timeout=20000)
+        page.goto(f'{BASE}/{app}/?ns=test'); page.wait_for_selector('#pw', timeout=20000)
         if app == 'p1': shot(page, f'{app}_0_lock')
         unlock(page, app, wrong_first=True)
         check(f'[{app}] 비밀번호 해제', page.is_visible('#cards'))
         check(f'[{app}] 머리글 제목', page.text_content('.top h1').strip() == TITLES[app], page.text_content('.top h1'))
         names = page.eval_on_selector_all('.cname', 'els=>els.map(e=>e.textContent.trim())')
         check(f'[{app}] 카드 {len(EXPECT[app])}개·순서', names == EXPECT[app], ' > '.join(names))
-        tels = page.goto(f'{BASE}/{app}/#c/{app}-1' if app == 'p1' else f'{BASE}/{app}/#c/{app}-C')
-        page.wait_for_selector('#vbtn')
+        tels = page.goto(f'{BASE}/{app}/?ns=test#c/{app}-1' if app == 'p1' else f'{BASE}/{app}/?ns=test#c/{app}-C')
+        page.wait_for_selector('#seg')
         hrefs = page.eval_on_selector_all('a.tel', 'els=>els.map(e=>e.getAttribute("href"))')
         check(f'[{app}] 전화 tel: 링크', hrefs and all(re.fullmatch(r'tel:010\d{8}', h) for h in hrefs), f'{len(hrefs)}개')
-        page.goto(f'{BASE}/{app}/#list'); page.wait_for_selector('#cards')
+        page.goto(f'{BASE}/{app}/?ns=test#list'); page.wait_for_selector('#cards')
         shot(page, f'{app}_1_list')
         # 상세 입력
         first = f'{app}-1' if app == 'p1' else f'{app}-A'
-        page.click(f'[data-open="{first}"]'); page.wait_for_selector('#vbtn')
+        page.click(f'[data-open="{first}"]'); page.wait_for_selector('#seg')
         shot(page, f'{app}_2_detail_top')
-        page.click('#vbtn'); page.wait_for_selector('#vbtn.on')
+        page.click('[data-st=done]'); page.wait_for_selector('#seg .on.s-done')
         vals = {'answer': '테스트 답변: 장비 임대 가능, 데이터는 별도 협의 (가짜)', 'met': '홍길동 과장 (가짜 인물, 010-0000-0000)', 'memo': '테스트 메모 줄1\n줄2 — 시연 영상 확인', 'followup': '다음 주 화요일까지 견적 요청 메일 (테스트)'}
         for k, v in vals.items(): page.fill(f'#f-{k}', v)
         page.set_input_files('input[data-kind=photo][multiple]', [os.path.join(IMG, 'site1.jpg'), os.path.join(IMG, 'site2.jpg')])
@@ -80,41 +80,41 @@ with sync_playwright() as p:
         shot(page, f'{app}_4_detail_photos')
         # 자동 저장만으로(저장 버튼 없이) 새로고침 유지
         page.fill('#f-memo', vals['memo'] + '\n자동저장 확인'); page.wait_for_timeout(100)
-        page.reload(); page.wait_for_selector('#vbtn')
+        page.reload(); page.wait_for_selector('#seg')
         got = {k: page.input_value(f'#f-{k}') for k in vals}
         ok = all(got[k] == vals[k] for k in ('answer', 'met', 'followup')) and got['memo'].endswith('자동저장 확인')
-        check(f'[{app}] 새로고침 후 입력 유지(자동 저장)', ok and page.is_visible('#vbtn.on'))
+        check(f'[{app}] 새로고침 후 입력 유지(자동 저장)', ok and page.is_visible('#seg .on.s-done'))
         check(f'[{app}] 새로고침 후 사진 유지', page.eval_on_selector_all('.ph img', 'e=>e.length') == 3)
         # 브라우저 닫았다 열기(같은 저장소)
         state = ctx.storage_state()
         # 오프라인
-        page.goto(f'{BASE}/{app}/#list'); page.wait_for_selector('#cards')
+        page.goto(f'{BASE}/{app}/?ns=test#list'); page.wait_for_selector('#cards')
         page.wait_for_function('navigator.serviceWorker && navigator.serviceWorker.controller', timeout=20000)
         page.wait_for_timeout(800)
         ctx.set_offline(True)
         try:
             page.reload(wait_until='domcontentloaded'); page.wait_for_selector('#cards', timeout=15000)
             n_off = page.eval_on_selector_all('.cname', 'e=>e.length')
-            page.click(f'[data-open="{first}"]'); page.wait_for_selector('#vbtn')
+            page.click(f'[data-open="{first}"]'); page.wait_for_selector('#seg')
             off_ok = n_off == len(EXPECT[app]) and page.input_value('#f-answer') == vals['answer'] and page.eval_on_selector_all('.ph img', 'e=>e.length') == 3
             check(f'[{app}] 오프라인 새로고침·기록 열람', off_ok, f'카드 {n_off}개')
             if app == 'p1': shot(page, f'{app}_5_offline_detail')
         finally:
             ctx.set_offline(False)
         # 보내기
-        page.goto(f'{BASE}/{app}/#more'); page.wait_for_selector('#x-csv')
+        page.goto(f'{BASE}/{app}/?ns=test#more'); page.wait_for_selector('#x-csv')
         shot(page, f'{app}_6_export')
         csvp = download(page, '#x-csv'); raw = open(csvp, 'rb').read(); txt = raw.decode('utf-8-sig')
         import csv, io
         rows = list(csv.reader(io.StringIO(txt)))
-        check(f'[{app}] CSV 받기(BOM·내용)', raw[:3] == b'\xef\xbb\xbf' and len(rows) == len(EXPECT[app]) + 1 and [r[1] for r in rows[1:]] == EXPECT[app] and rows[1][7] == vals['answer'] and rows[1][4] == '방문', f'{os.path.basename(csvp)}, {len(rows)}행')
+        check(f'[{app}] CSV 받기(BOM·내용)', raw[:3] == b'\xef\xbb\xbf' and len(rows) == len(EXPECT[app]) + 1 and [r[1] for r in rows[1:]] == EXPECT[app] and rows[1][6] == vals['answer'] and rows[1][4] == '완료', f'{os.path.basename(csvp)}, {len(rows)}행')
         txtp = download(page, '#x-txt'); t = open(txtp, encoding='utf-8').read()
         check(f'[{app}] 텍스트 받기(내용)', all(n in t for n in EXPECT[app]) and vals['followup'] in t and '사진 2장 · 명함 1장' in t, os.path.basename(txtp))
         bkp = download(page, '#b-save'); bk = json.load(open(bkp, encoding='utf-8'))
-        check(f'[{app}] 전체 백업(JSON·사진 base64)', bk['app'] == app and len(bk['photos']) == 3 and all(len(x['b64']) > 1000 for x in bk['photos']), f"{os.path.getsize(bkp)//1024}KB")
+        check(f'[{app}] 전체 백업(JSON·사진 base64)', bk['app'] == app and len([x for x in bk['photos'] if not x.get('deleted')]) == 3 and all(len(x['b64']) > 1000 for x in bk['photos'] if x.get('b64')), f"{os.path.getsize(bkp)//1024}KB")
         # 보고서
-        page.goto(f'{BASE}/{app}/#report'); page.wait_for_selector('#m-op')
-        page.fill('#m-writer', '테스트 작성자'); page.fill('#m-op', '종합 의견 테스트: 1순위 로봇 2개사와 실증 협력 우선 검토.\n(샘플 데이터)')
+        page.goto(f'{BASE}/{app}/?ns=test#report'); page.wait_for_selector('#m-opinion')
+        page.fill('#m-opinion', '종합 의견 테스트: 1순위 로봇 2개사와 실증 협력 우선 검토.\n(샘플 데이터)')
         page.check('#m-mask'); page.wait_for_timeout(600)
         prev = page.text_content('#preview')
         check(f'[{app}] 보고서 미리보기(종합 의견·업체·사진)', '종합 의견 테스트' in prev and all(n in prev for n in EXPECT[app]) and page.eval_on_selector_all('#preview img', 'e=>e.length') == 3)
@@ -140,14 +140,14 @@ with sync_playwright() as p:
         # 다른 기기에서 백업 불러오기
         ctx2 = br.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True, locale='ko-KR', timezone_id='Asia/Seoul', accept_downloads=True)
         pg2 = ctx2.new_page(); unlock(pg2, app)
-        pg2.goto(f'{BASE}/{app}/#more'); pg2.wait_for_selector('#b-imp', state='attached')
+        pg2.goto(f'{BASE}/{app}/?ns=test#more'); pg2.wait_for_selector('#b-imp', state='attached')
         pg2.on('dialog', lambda dg: dg.accept())
-        pg2.set_input_files('#b-imp', bkp); pg2.wait_for_selector('#cards', timeout=20000); pg2.wait_for_timeout(300)
-        pg2.click(f'[data-open="{first}"]'); pg2.wait_for_selector('#vbtn')
+        pg2.set_input_files('#b-imp', bkp); pg2.wait_for_selector('#cards', timeout=20000); pg2.wait_for_timeout(1500)
+        pg2.click(f'[data-open="{first}"]'); pg2.wait_for_selector('#seg')
         check(f'[{app}] 다른 기기에서 백업 불러오기', pg2.input_value('#f-answer') == vals['answer'] and pg2.eval_on_selector_all('.ph img', 'e=>e.length') == 3)
         if app == 'p1':
             # 다른 앱 백업 거부
-            pg3 = ctx2.new_page(); unlock(pg3, 'p2'); pg3.goto(f'{BASE}/p2/#more'); pg3.wait_for_selector('#b-imp', state='attached')
+            pg3 = ctx2.new_page(); unlock(pg3, 'p2'); pg3.goto(f'{BASE}/p2/?ns=test#more'); pg3.wait_for_selector('#b-imp', state='attached')
             pg3.set_input_files('#b-imp', bkp); pg3.wait_for_timeout(800)
             check('[p2] 1순위 백업은 2순위 앱에서 거부', '다른 앱' in (pg3.text_content('#toast') or '')); pg3.close()
         ctx2.close()
@@ -155,8 +155,8 @@ with sync_playwright() as p:
         ctx.close()
         ctx3 = br.new_context(viewport={'width': 390, 'height': 844}, storage_state=state)
         # storage_state는 IndexedDB를 옮기지 않으므로 localStorage 사본 복구 확인용
-        pg = ctx3.new_page(); pg.goto(f'{BASE}/{app}/'); pg.wait_for_selector('#pw')
-        ls_ok = pg.evaluate(f"!!localStorage.getItem('expo2026-{app}-e-{first}')")
+        pg = ctx3.new_page(); pg.goto(f'{BASE}/{app}/?ns=test'); pg.wait_for_selector('#pw')
+        ls_ok = pg.evaluate(f"Object.keys(localStorage).some(k=>k.startsWith('expo2026-{app}-test-i-{first}|'))")
         check(f'[{app}] 입력 즉시 localStorage 사본 기록', ls_ok); ctx3.close()
         check(f'[{app}] 화면 스크립트 오류 없음', not errs, '; '.join(errs)[:200])
     br.close()

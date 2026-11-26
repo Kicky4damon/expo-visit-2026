@@ -6,3 +6,9 @@ sample/
 deploy_commands.sh.log
 __pycache__/
 deploy_commands.sh
+secrets/
+supabase/.temp/
+supabase/.branches/
+supabase/.env
+docs/
+stt_worker/
