@@ -77,6 +77,7 @@
   const urls = new Map();
   let lastSaved = 0;
   const NET = { online: navigator.onLine, connected: false, peers: [], lastSync: 0, err: '' };
+  const isConn = () => !!(chan && chan.state === 'joined') && navigator.onLine;
 
   const key = (cid, f) => cid + '|' + f;
   const item = (cid, f) => ITEMS[key(cid, f)];
@@ -141,7 +142,8 @@
   let sb = null, chan = null, kickT = null, loopT = null, syncing = false, presenceKey = rid();
   const syncReady = () => SC.kind === 'supabase' && SKEY && AUTHPW;
   function kick(ms = 600) { clearTimeout(kickT); kickT = setTimeout(syncNow, ms); }
-  window.addEventListener('online', () => { NET.online = true; renderNet(); kick(100); });
+  window.addEventListener('online', () => { NET.online = true; renderNet(); kick(100); setTimeout(() => { if (sb && syncReady()) pullAll().catch(() => {}); }, 2500); });
+  setInterval(() => { const c = isConn(); if (c !== NET.connected) { const was = NET.connected; NET.connected = c; renderNet(); if (c && !was && sb) pullAll().catch(() => {}); } }, 2000);
   window.addEventListener('offline', () => { NET.online = false; NET.connected = false; renderNet(); });
   async function ensureClient() {
     if (sb) return sb;
@@ -196,7 +198,7 @@
     finally { syncing = false; renderNet(); }
     if (dirtyCount()) { clearTimeout(loopT); loopT = setTimeout(syncNow, 5000); }
   }
-  setInterval(() => { if (syncReady() && navigator.onLine && (dirtyCount() || !NET.connected)) syncNow(); }, 10000);
+  setInterval(() => { if (syncReady() && navigator.onLine && (dirtyCount() || !isConn())) syncNow(); }, 10000);
 
   async function pushAll() {
     for (const it of Object.values(ITEMS)) if (it.dirty) {
@@ -761,6 +763,6 @@
     try { DATA = await idbGet('kv', 'data'); } catch (_) { DATA = null; }
     if (DATA && DATA.app === CFG.id) start(); else renderLock();
   }
-  window.__expo = { syncNow, pullAll, state: () => ({ me: ME, net: Object.assign({}, NET), dirty: dirtyCount(), items: Object.values(ITEMS).map(x => ({ cid: x.cid, field: x.field, v: x.v, ts: x.ts, by: x.by, dirty: x.dirty })), photos: Object.values(PHOTOS).map(p => ({ id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, ts: p.ts, by: p.by, path: p.path, deleted: p.deleted, dirty: p.dirty, hasBlob: !!p.blob, size: p.blob ? p.blob.size : 0 })), recs: Object.values(RECS).map(r => ({ id: r.id, cid: r.cid, status: r.status, path: r.path, deleted: r.deleted, dirty: r.dirty, size: r.size, mime: r.mime, duration: r.duration, hasSummary: !!r.summary, hasTranscript: !!r.transcript })) }) };
+  window.__expo = { syncNow, pullAll, state: () => ({ me: ME, net: Object.assign({}, NET, { connected: isConn() }), dirty: dirtyCount(), items: Object.values(ITEMS).map(x => ({ cid: x.cid, field: x.field, v: x.v, ts: x.ts, by: x.by, dirty: x.dirty })), photos: Object.values(PHOTOS).map(p => ({ id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, ts: p.ts, by: p.by, path: p.path, deleted: p.deleted, dirty: p.dirty, hasBlob: !!p.blob, size: p.blob ? p.blob.size : 0 })), recs: Object.values(RECS).map(r => ({ id: r.id, cid: r.cid, status: r.status, path: r.path, deleted: r.deleted, dirty: r.dirty, size: r.size, mime: r.mime, duration: r.duration, hasSummary: !!r.summary, hasTranscript: !!r.transcript })) }) };
   boot();
 })();
