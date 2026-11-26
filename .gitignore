@@ -1,0 +1,8 @@
+PASSWORD.txt
+data_src/
+work/
+shots/
+sample/
+deploy_commands.sh.log
+__pycache__/
+deploy_commands.sh
