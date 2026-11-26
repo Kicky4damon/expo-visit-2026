@@ -206,6 +206,8 @@ with sync_playwright() as p:
             if srow['status'] == 'done': break
             time.sleep(1)
         wait(A_, "!!document.querySelector('#reclist .sumbox')", timeout=30000)
+        wait(A_, "[...document.querySelectorAll('[data-conv]')].some(b=>b.textContent.includes('다시 변환'))", timeout=20000)
+        check('완료(done) 녹음에 [다시 변환] 버튼', True)
     # 오프라인 녹음
     devs['B'][0].set_offline(True); time.sleep(0.3)
     preB = {r['id'] for r in st(B_)['recs']}
