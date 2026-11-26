@@ -86,7 +86,8 @@
   const status = cid => val(cid, 'status', 'none') || 'none';
   const myBy = () => ME.no || 0;
   // 이름: 기기마다 한 번 고름(kv 'myname'). 다른 사람에게는 '_users' 항목(n<번호> = 이름)으로 동기화. 화면에는 번호 대신 이름만
-  let MYNAME = '', PEOPLE = [];
+  const LOCK_NAMES = ['강명석 부장', '이근섭 과장', '허민욱 과장'];   // 잠금 화면에서 고르는 이름(요청으로 화면 코드에 둠)
+  let MYNAME = '', PEOPLE = LOCK_NAMES.slice();
   const nameOf = by => (by && by === ME.no && MYNAME) ? MYNAME : (by ? val('_users', 'n' + by) : MYNAME);
   const who = by => nameOf(by) || (by ? '사용자 ' + by : '사용자 ?(임시)');
   const marker = obj => obj && obj.ts ? `${who(obj.by)} · ${hhmm(new Date(obj.ts))}` : '';
@@ -133,7 +134,7 @@
     for (const p of await idbAll('photos')) PHOTOS[p.id] = p;
     for (const r of await idbAll('recs')) RECS[r.id] = r;
     ME = (await idbGet('kv', 'me')) || ME;
-    MYNAME = (await idbGet('kv', 'myname')) || ''; PEOPLE = (await idbGet('kv', 'people')) || [];
+    MYNAME = (await idbGet('kv', 'myname')) || ''; PEOPLE = (await idbGet('kv', 'people')) || PEOPLE;
     SKEY = (await idbGet('kv', 'skey')) || null; AUTHPW = (await idbGet('kv', 'authpw')) || null;
     lastSaved = Math.max(0, ...Object.values(ITEMS).map(x => x.ts || 0));
     await migrateV1();
@@ -361,11 +362,15 @@
     document.body.innerHTML = `<div class="top"><h1>${esc(CFG.title)}</h1></div>
     <div class="lock"><div class="sec"><h2>처음 한 번만 비밀번호를 넣어 주세요</h2>
     <p class="small">업체 담당자 연락처가 들어 있어서 잠가 두었어요. 한 번 열면 이 폰에서는 다시 묻지 않아요. 같은 링크를 연 사람끼리 기록이 실시간으로 함께 보여요.</p>
-    <form id="lf"><input id="pw" type="password" autocomplete="current-password" placeholder="비밀번호" aria-label="비밀번호">
+    <form id="lf"><div class="btns one" id="lnames">${LOCK_NAMES.map(n => `<button type="button" class="btn big ${n === MYNAME ? '' : 'sub'}" data-lpick="${esc(n)}">${n === MYNAME ? '✓ ' : ''}${esc(n)}</button>`).join('')}</div>
+    <input id="pw" type="password" autocomplete="current-password" placeholder="비밀번호" aria-label="비밀번호">
     <div class="err" id="lerr"></div><button class="btn big" id="lbtn">열기</button></form></div></div>`;
+    let pick = LOCK_NAMES.includes(MYNAME) ? MYNAME : '';
+    document.querySelectorAll('[data-lpick]').forEach(x => x.onclick = () => { pick = x.dataset.lpick; document.querySelectorAll('[data-lpick]').forEach(y => { const on = y.dataset.lpick === pick; y.className = 'btn big ' + (on ? '' : 'sub'); y.textContent = (on ? '✓ ' : '') + y.dataset.lpick; }); $('#lerr').textContent = ''; });
     $('#lf').onsubmit = async ev => {
-      ev.preventDefault(); const b = $('#lbtn'); b.classList.add('busy'); b.textContent = '여는 중…'; $('#lerr').textContent = '';
-      try { await unlockWith($('#pw').value.trim()); await start(); }
+      ev.preventDefault(); if (!pick) { $('#lerr').textContent = '이름을 골라 주세요.'; return; }
+      const b = $('#lbtn'); b.classList.add('busy'); b.textContent = '여는 중…'; $('#lerr').textContent = '';
+      try { await unlockWith($('#pw').value.trim()); MYNAME = pick; await idbPut('kv', pick, 'myname'); await start(); }
       catch (e) { $('#lerr').textContent = (e && e.name === 'OperationError') ? '비밀번호가 맞지 않아요.' : '열지 못했어요. 인터넷 연결을 확인해 주세요.'; b.classList.remove('busy'); b.textContent = '열기'; }
     };
   }
@@ -767,7 +772,7 @@
       navigator.serviceWorker.addEventListener('controllerchange', () => { if (!hadCtl || reloaded || RS) return; reloaded = true; location.reload(); });
     }
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-    try { DATA = await idbGet('kv', 'data'); } catch (_) { DATA = null; }
+    try { DATA = await idbGet('kv', 'data'); MYNAME = (await idbGet('kv', 'myname')) || ''; } catch (_) { DATA = null; }
     if (DATA && DATA.app === CFG.id) start(); else renderLock();
   }
   window.__expo = { syncNow, pullAll, state: () => ({ me: ME, myname: MYNAME, people: PEOPLE.length, net: Object.assign({}, NET, { connected: isConn() }), dirty: dirtyCount(), items: Object.values(ITEMS).map(x => ({ cid: x.cid, field: x.field, v: x.v, ts: x.ts, by: x.by, dirty: x.dirty })), photos: Object.values(PHOTOS).map(p => ({ id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, ts: p.ts, by: p.by, path: p.path, deleted: p.deleted, dirty: p.dirty, hasBlob: !!p.blob, size: p.blob ? p.blob.size : 0 })), recs: Object.values(RECS).map(r => ({ id: r.id, cid: r.cid, status: r.status, path: r.path, deleted: r.deleted, dirty: r.dirty, size: r.size, mime: r.mime, duration: r.duration, hasSummary: !!r.summary, hasTranscript: !!r.transcript })) }) };

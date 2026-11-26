@@ -33,11 +33,19 @@ def unlock(page, app, wrong_first=False):
     page.goto(f'{BASE}/{app}/?ns=test', wait_until='domcontentloaded')
     page.wait_for_selector('#pw', timeout=20000)
     if wrong_first:
-        page.fill('#pw', 'wrong-password-123'); page.click('#lbtn')
+        page.click('[data-lpick] >> nth=0'); page.fill('#pw', 'wrong-password-123'); page.click('#lbtn')
         page.wait_for_function("document.querySelector('#lerr') && document.querySelector('#lerr').textContent.length>0", timeout=20000)
         check(f'[{app}] 틀린 비밀번호 거부', '맞지 않아요' in page.text_content('#lerr'), page.text_content('#lerr'))
+    if page.query_selector('[data-lpick]') and not wrong_first:
+        page.click('#lbtn'); page.wait_for_timeout(200)
+        check(f'[{app}] 이름 안 고르면 열기 안 됨(안내)', '이름을 골라' in page.text_content('#lerr'))
+        if app_shot_pick.get(app + 'L') is None: app_shot_pick[app + 'L'] = 1; shot(page, f'{app}_0a_lock_names')
+        page.click('[data-lpick] >> nth=1')
     page.fill('#pw', PW); page.click('#lbtn')
     page.wait_for_selector('[data-pick], #cards', timeout=30000)
+    if page.query_selector('#cards'):
+        nm = page.evaluate('window.__expo.state().myname')
+        check(f'[{app}] 잠금 화면에서 이름 고르고 비밀번호 → 바로 업체 목록, 머리글에 이름', bool(nm) and page.text_content('#me') == '나: ' + nm)
     if page.query_selector('[data-pick]'):
         n_pick = len(page.query_selector_all('[data-pick]'))
         if app_shot_pick.get(app) is None: app_shot_pick[app] = 1; shot(page, f'{app}_0b_pick_name')

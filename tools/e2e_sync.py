@@ -36,8 +36,8 @@ with sync_playwright() as p:
         return ctx, pg
     devs = {n: device() for n in 'ABC'}
     def login(pg, idx):
-        pg.goto(URL); pg.wait_for_selector('#pw', timeout=30000); pg.fill('#pw', PW); pg.click('#lbtn')
-        pg.wait_for_selector('[data-pick]', timeout=40000); pg.click(f'[data-pick] >> nth={idx}'); pg.wait_for_selector('#cards', timeout=40000)
+        pg.goto(URL); pg.wait_for_selector('#pw', timeout=30000); pg.click(f'[data-lpick] >> nth={idx}'); pg.fill('#pw', PW); pg.click('#lbtn')
+        pg.wait_for_selector('#cards', timeout=40000)
     for i, (n, (ctx, pg)) in enumerate(devs.items()): login(pg, i)
     for n, (ctx, pg) in devs.items():
         wait(pg, 'window.__expo.state().me.no && window.__expo.state().net.connected', timeout=40000)
