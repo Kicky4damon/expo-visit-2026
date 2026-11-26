@@ -105,7 +105,21 @@
     saveItem(it); kick(); return it;
   }
 
+  // 데이터 시대(epoch): 서버를 초기화할 때마다 올림. 기기의 값이 다르면 이 기기의 기록·보낼 것·사용자 번호를 버리고 새로 시작
+  // (비밀번호로 연 잠금 정보·회사 자료·로그인은 그대로). 서버도 초기화 전 시각의 쓰기는 거부함(migrations/20261127081500_epoch_cutoff.sql).
+  const DATA_EPOCH = '20261127a';
+  async function epochCheck() {
+    if ((await idbGet('kv', 'epoch')) === DATA_EPOCH) return false;
+    for (const st of ['items', 'photos', 'recs', 'entries']) await idbClear(st);
+    for (const k of ['me', 'meta']) await idbDel('kv', k);
+    await idbPut('kv', Date.now(), 'migrated2');                       // 옛 v1 자료도 다시 옮기지 않음
+    Object.keys(localStorage).filter(k => k.startsWith(LS + 'i-') || k.startsWith(LS + 'e-') || k === LS + 'meta').forEach(k => localStorage.removeItem(k));
+    ME = { no: null, tmp: null };
+    await idbPut('kv', DATA_EPOCH, 'epoch');
+    return true;
+  }
   async function loadLocal() {
+    await epochCheck();
     const keys = await idbAllKeys('items'), vals = await idbAll('items');
     keys.forEach((k, i) => { ITEMS[k] = vals[i]; });
     // localStorage 사본(닫기 직전 입력)이 더 새로우면 반영
