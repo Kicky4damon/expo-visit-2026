@@ -178,7 +178,7 @@
   }
   function publishName() { if (ME.no && MYNAME && val('_users', 'n' + ME.no) !== MYNAME) setField('_users', 'n' + ME.no, MYNAME); }
   async function loadPeople() {   // 이름 목록: shared/people.enc.txt (공용 키로 암호화, 저장소에 평문 없음)
-    try { const t = await (await fetch('../shared/people.enc.txt', { cache: 'no-cache' })).text(); const a = JSON.parse(await decText(t.trim())); if (Array.isArray(a) && a.length) { PEOPLE = a; await idbPut('kv', a, 'people'); } } catch (_) {}
+    try { const t = await (await fetch('../shared/people.enc.txt?v=' + (window.APP_VERSION || ''), { cache: 'no-cache' })).text(); const a = JSON.parse(await decText(t.trim())); if (Array.isArray(a) && a.length) { PEOPLE = a; await idbPut('kv', a, 'people'); } } catch (_) {}
   }
   async function pickName(n) {
     MYNAME = n; await idbPut('kv', n, 'myname'); publishName();
@@ -225,6 +225,7 @@
     } catch (e) { NET.err = (e && (e.message || e.error_description)) || String(e); console.warn('sync', e); }
     finally { syncing = false; renderNet(); }
     if (dirtyCount()) { clearTimeout(loopT); loopT = setTimeout(syncNow, 5000); }
+    if (!PEOPLE.length && SKEY) loadPeople().then(() => { if (PEOPLE.length && !MYNAME) route(); });   // 이름 목록을 처음에 못 받았으면 다시
   }
   setInterval(() => { if (syncReady() && navigator.onLine && (dirtyCount() || !isConn())) syncNow(); }, 10000);
 

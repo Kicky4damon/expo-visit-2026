@@ -1,9 +1,9 @@
 // 오프라인용 서비스워커 (p1). 범위: /p1/  — 배포마다 tools/stamp.py가 VERSION과 ?v=를 바꿔 옛 캐시를 자동 교체
-const VERSION = 'expo-p1-20261127b';
+const VERSION = 'expo-p1-20261127c';
 const Q = '?v=' + VERSION.split('-').pop();
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon.svg', './data.enc.json',
   '../shared/app.js' + Q, '../shared/app.css' + Q, '../shared/supabase.js' + Q, '../shared/sync-config.js' + Q,
-  '../shared/docx.iife.js', '../shared/people.enc.txt', '../shared/fonts/Pretendard-Regular.woff2', '../shared/fonts/Pretendard-Bold.woff2'];
+  '../shared/docx.iife.js', '../shared/people.enc.txt' + Q, '../shared/fonts/Pretendard-Regular.woff2', '../shared/fonts/Pretendard-Bold.woff2'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
