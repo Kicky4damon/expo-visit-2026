@@ -57,34 +57,30 @@ with sync_playwright() as p:
         check(f'[{app}] 전화 tel: 링크', hrefs and all(re.fullmatch(r'tel:010\d{8}', h) for h in hrefs), f'{len(hrefs)}개')
         page.goto(f'{BASE}/{app}/?ns=test#list'); page.wait_for_selector('#cards')
         shot(page, f'{app}_1_list')
+        check(f'[{app}] ?ns=test 일 때 “테스트 공간” 표시·테스트 매니페스트', page.is_visible('.testns') and page.evaluate("document.getElementById('mf').getAttribute('href')") == 'manifest-test.webmanifest')
         # 상세 입력
         first = f'{app}-1' if app == 'p1' else f'{app}-A'
         page.click(f'[data-open="{first}"]'); page.wait_for_selector('#seg')
         shot(page, f'{app}_2_detail_top')
         page.click('[data-st=done]'); page.wait_for_selector('#seg .on.s-done')
-        vals = {'answer': '테스트 답변: 장비 임대 가능, 데이터는 별도 협의 (가짜)', 'met': '홍길동 과장 (가짜 인물, 010-0000-0000)', 'memo': '테스트 메모 줄1\n줄2 — 시연 영상 확인', 'followup': '다음 주 화요일까지 견적 요청 메일 (테스트)'}
+        vals = {'answer': '테스트 답변: 장비 임대 가능, 데이터는 별도 협의 (가짜)', 'met': '홍길동 과장 (가짜 인물, 010-0000-0000)'}
         for k, v in vals.items(): page.fill(f'#f-{k}', v)
-        page.set_input_files('input[data-kind=photo][multiple]', [os.path.join(IMG, 'site1.jpg'), os.path.join(IMG, 'site2.jpg')])
-        page.wait_for_function("document.querySelectorAll('#ph-photo img').length==2", timeout=20000)
-        page.set_input_files('input[data-kind=card][capture]', os.path.join(IMG, 'card1.jpg'))
-        page.wait_for_function("document.querySelectorAll('#ph-card img').length==1", timeout=20000)
+        body = page.text_content('main')
+        gone = all(page.query_selector(x) is None for x in ('#f-memo', '#f-followup', '#ph-photo', '#ph-card', 'input[type=file]', '[data-apply]'))
+        check(f'[{app}] 상세 화면에 자유 메모·후속 조치·현장 사진·명함 사진 없음', gone and not any(w in body for w in ('자유 메모', '후속 조치', '현장 사진', '명함 사진')))
         page.click('#savebtn'); page.wait_for_timeout(500)
         saved = page.text_content('#saved')
         check(f'[{app}] 저장 버튼·저장 시각 표시', re.search(r'저장됨 \d\d:\d\d:\d\d', saved), saved)
-        st = page.evaluate('window.__expo.state()')
-        dims = [(x['w'], x['h']) for x in st['photos']]
-        check(f'[{app}] 사진 3장(현장2·명함1) 저장·긴 변 1600px', len(dims) == 3 and all(max(d) == 1600 for d in dims), str(dims))
-        page.evaluate("document.querySelector('#f-memo').scrollIntoView()"); page.wait_for_timeout(200)
+        page.evaluate("document.querySelector('#f-answer').scrollIntoView()"); page.wait_for_timeout(200)
         shot(page, f'{app}_3_detail_input')
-        page.evaluate("document.querySelector('#ph-card').scrollIntoView({block:'end'})"); page.wait_for_timeout(300)
-        shot(page, f'{app}_4_detail_photos')
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); page.wait_for_timeout(300)
+        shot(page, f'{app}_4_detail_bottom')
         # 자동 저장만으로(저장 버튼 없이) 새로고침 유지
-        page.fill('#f-memo', vals['memo'] + '\n자동저장 확인'); page.wait_for_timeout(100)
+        page.fill('#f-met', vals['met'] + '\n자동저장 확인'); page.wait_for_timeout(100)
         page.reload(); page.wait_for_selector('#seg')
         got = {k: page.input_value(f'#f-{k}') for k in vals}
-        ok = all(got[k] == vals[k] for k in ('answer', 'met', 'followup')) and got['memo'].endswith('자동저장 확인')
+        ok = got['answer'] == vals['answer'] and got['met'].endswith('자동저장 확인'); vals['met'] = got['met']
         check(f'[{app}] 새로고침 후 입력 유지(자동 저장)', ok and page.is_visible('#seg .on.s-done'))
-        check(f'[{app}] 새로고침 후 사진 유지', page.eval_on_selector_all('.ph img', 'e=>e.length') == 3)
         # 브라우저 닫았다 열기(같은 저장소)
         state = ctx.storage_state()
         # 오프라인
@@ -96,7 +92,7 @@ with sync_playwright() as p:
             page.reload(wait_until='domcontentloaded'); page.wait_for_selector('#cards', timeout=15000)
             n_off = page.eval_on_selector_all('.cname', 'e=>e.length')
             page.click(f'[data-open="{first}"]'); page.wait_for_selector('#seg')
-            off_ok = n_off == len(EXPECT[app]) and page.input_value('#f-answer') == vals['answer'] and page.eval_on_selector_all('.ph img', 'e=>e.length') == 3
+            off_ok = n_off == len(EXPECT[app]) and page.input_value('#f-answer') == vals['answer']
             check(f'[{app}] 오프라인 새로고침·기록 열람', off_ok, f'카드 {n_off}개')
             if app == 'p1': shot(page, f'{app}_5_offline_detail')
         finally:
@@ -107,17 +103,18 @@ with sync_playwright() as p:
         csvp = download(page, '#x-csv'); raw = open(csvp, 'rb').read(); txt = raw.decode('utf-8-sig')
         import csv, io
         rows = list(csv.reader(io.StringIO(txt)))
-        check(f'[{app}] CSV 받기(BOM·내용)', raw[:3] == b'\xef\xbb\xbf' and len(rows) == len(EXPECT[app]) + 1 and [r[1] for r in rows[1:]] == EXPECT[app] and rows[1][6] == vals['answer'] and rows[1][4] == '완료', f'{os.path.basename(csvp)}, {len(rows)}행')
+        check(f'[{app}] CSV 받기(BOM·내용)', raw[:3] == b'\xef\xbb\xbf' and len(rows) == len(EXPECT[app]) + 1 and [r[1] for r in rows[1:]] == EXPECT[app] and rows[1][6] == vals['answer'] and rows[1][4] == '완료' and not any(h in rows[0] for h in ('메모', '후속 조치', '사진 수', '명함 수')), f'{os.path.basename(csvp)}, {len(rows)}행')
         txtp = download(page, '#x-txt'); t = open(txtp, encoding='utf-8').read()
-        check(f'[{app}] 텍스트 받기(내용)', all(n in t for n in EXPECT[app]) and vals['followup'] in t and '사진 2장 · 명함 1장' in t, os.path.basename(txtp))
+        check(f'[{app}] 텍스트 받기(내용)', all(n in t for n in EXPECT[app]) and vals['answer'] in t and not any(w in t for w in ('메모:', '후속 조치', '장 · 명함', '현장 사진', '명함 사진')), os.path.basename(txtp))
         bkp = download(page, '#b-save'); bk = json.load(open(bkp, encoding='utf-8'))
-        check(f'[{app}] 전체 백업(JSON·사진 base64)', bk['app'] == app and len([x for x in bk['photos'] if not x.get('deleted')]) == 3 and all(len(x['b64']) > 1000 for x in bk['photos'] if x.get('b64')), f"{os.path.getsize(bkp)//1024}KB")
+        check(f'[{app}] 전체 백업(JSON)', bk['app'] == app and any(i.get('field') == 'answer' for i in bk.get('items', [])), f"{os.path.getsize(bkp)//1024}KB")
         # 보고서
         page.goto(f'{BASE}/{app}/?ns=test#report'); page.wait_for_selector('#m-opinion')
         page.fill('#m-opinion', '종합 의견 테스트: 1순위 로봇 2개사와 실증 협력 우선 검토.\n(샘플 데이터)')
         page.check('#m-mask'); page.wait_for_timeout(600)
         prev = page.text_content('#preview')
-        check(f'[{app}] 보고서 미리보기(종합 의견·업체·사진)', '종합 의견 테스트' in prev and all(n in prev for n in EXPECT[app]) and page.eval_on_selector_all('#preview img', 'e=>e.length') == 3)
+        check(f'[{app}] 보고서 미리보기(종합 의견·업체)', '종합 의견 테스트' in prev and all(n in prev for n in EXPECT[app]))
+        check(f'[{app}] 보고서에 자유 메모·후속 조치·현장 사진·명함 사진 없음', not any(w in prev for w in ('메모:', '후속 조치', '현장 사진', '명함 1')) and page.eval_on_selector_all('#preview img', 'e=>e.length') == 0)
         check(f'[{app}] 전화번호 가리기', not any(ph in prev for ph in REAL_PHONES) and ('010-****-****' in prev or app == 'p2'))
         shot(page, f'{app}_7_report_top')
         page.evaluate("document.querySelector('#preview').scrollIntoView()"); page.wait_for_timeout(300)
@@ -126,9 +123,9 @@ with sync_playwright() as p:
         import docx as pydocx
         d = pydocx.Document(docxp); body = '\n'.join(p_.text for p_ in d.paragraphs) + '\n'.join(c.text for tb in d.tables for r in tb.rows for c in r.cells)
         nimg = sum(1 for n in zipfile.ZipFile(docxp).namelist() if n.startswith('word/media/'))
-        check(f'[{app}] 워드(DOCX) 생성', '엘림주식회사' in body and '종합 의견 테스트' in body and all(n in body for n in EXPECT[app]) and nimg == 3 and not any(ph in body for ph in REAL_PHONES), f'이미지 {nimg}개, {os.path.getsize(docxp)//1024}KB')
+        check(f'[{app}] 워드(DOCX) 생성', '엘림주식회사' in body and '종합 의견 테스트' in body and all(n in body for n in EXPECT[app]) and nimg == 0 and not any(w in body for w in ('메모:', '후속 조치', '현장 사진')) and not any(ph in body for ph in REAL_PHONES), f'이미지 {nimg}개, {os.path.getsize(docxp)//1024}KB')
         mdp = download(page, '#r-txt'); md = open(mdp, encoding='utf-8').read()
-        check(f'[{app}] 보고서 텍스트', '종합 의견 테스트' in md and not any(ph in md for ph in REAL_PHONES))
+        check(f'[{app}] 보고서 텍스트', '종합 의견 테스트' in md and not any(w in md for w in ('메모:', '후속 조치', '장 · 명함', '현장 사진', '명함 사진')) and not any(ph in md for ph in REAL_PHONES))
         # 인쇄용 A4
         page.evaluate('window.print=()=>{}'); page.click('#r-print'); page.wait_for_timeout(500)
         pdfp = os.path.join(DL, f'{app}_report.pdf'); page.emulate_media(media='print'); page.pdf(path=pdfp, format='A4', print_background=True); page.emulate_media(media='screen')
@@ -144,7 +141,7 @@ with sync_playwright() as p:
         pg2.on('dialog', lambda dg: dg.accept())
         pg2.set_input_files('#b-imp', bkp); pg2.wait_for_selector('#cards', timeout=20000); pg2.wait_for_timeout(1500)
         pg2.click(f'[data-open="{first}"]'); pg2.wait_for_selector('#seg')
-        check(f'[{app}] 다른 기기에서 백업 불러오기', pg2.input_value('#f-answer') == vals['answer'] and pg2.eval_on_selector_all('.ph img', 'e=>e.length') == 3)
+        check(f'[{app}] 다른 기기에서 백업 불러오기', pg2.input_value('#f-answer') == vals['answer'] and pg2.input_value('#f-met') == vals['met'])
         if app == 'p1':
             # 다른 앱 백업 거부
             pg3 = ctx2.new_page(); unlock(pg3, 'p2'); pg3.goto(f'{BASE}/p2/?ns=test#more'); pg3.wait_for_selector('#b-imp', state='attached')

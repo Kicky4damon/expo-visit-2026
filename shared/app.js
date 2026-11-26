@@ -8,7 +8,8 @@
   const LS = 'expo2026-' + CFG.id + (NS_TEST ? '-test' : '') + '-';
   const SC = window.SYNC_CONFIG || { kind: 'none' };
   const COMPANY = '엘림주식회사';
-  const FIELDS = ['answer', 'met', 'memo', 'followup'];
+  const FIELDS = ['answer', 'met'];                       // 자유 메모·후속 조치·사진은 2026-11-26 21:38 요청으로 화면·보고서에서 뺌(옛 값은 무시)
+  const V1_FIELDS = ['answer', 'met', 'memo', 'followup'];
   const FIELD_LABEL = { answer: '받은 답변', met: '만난 사람', memo: '자유 메모', followup: '후속 조치' };
   const STATUS = { none: '미방문', doing: '방문중', done: '완료' };
   const REC_STATUS = { local: '보낼 준비(오프라인 저장)', uploading: '올리는 중', pending: '대기 중', processing: '처리 중', done: '완료', failed: '실패' };
@@ -129,7 +130,7 @@
     const put = async (cid, f, v, ts) => { if (v == null || v === '' || item(cid, f)) return; const it = { cid, field: f, v, ts: ts || Date.now(), by: 0, dirty: true }; ITEMS[key(cid, f)] = it; await saveItem(it); };
     for (const [cid, e] of Object.entries(ent)) {
       if (e.visited) await put(cid, 'status', 'done', e.visitedAt || e.updatedAt);
-      for (const f of FIELDS) await put(cid, f, e[f], e.updatedAt);
+      for (const f of V1_FIELDS) await put(cid, f, e[f], e.updatedAt);
     }
     let meta = await idbGet('kv', 'meta');
     try { const lm = JSON.parse(localStorage.getItem(LS + 'meta') || 'null'); if (lm && (!meta || (lm.updatedAt || 0) > (meta.updatedAt || 0))) meta = lm; } catch (_) {}
@@ -307,7 +308,7 @@
   function shell(title, back, body, nav) {
     document.body.className = CFG.id;
     document.body.innerHTML = `<div class="top">${back ? '<button class="back" id="back" aria-label="뒤로">‹</button>' : ''}<h1>${esc(title)}</h1><span class="saved" id="saved"></span></div>
-      <div class="who"><b id="me"></b><span id="net" class="net"></span><span id="peers" class="peers"></span></div>
+      <div class="who">${NS_TEST ? '<span class="testns">테스트 공간</span>' : ''}<b id="me"></b><span id="net" class="net"></span><span id="peers" class="peers"></span></div>
       <main>${body}</main>${nav || ''}<div class="toast" id="toast"></div><div id="print-root"></div>`;
     if (back) $('#back').onclick = () => { location.hash = back; };
     showSaved(); renderNet();
@@ -353,13 +354,13 @@
     const cnt = { none: 0, doing: 0, done: 0 }; cs.forEach(c => cnt[status(c.id)]++);
     const items = cs.map(c => {
       const st = status(c.id), sit = item(c.id, 'status');
-      const np = photosOf(c.id, 'photo').length, nc = photosOf(c.id, 'card').length, nr = recsOf(c.id).length;
+      const nr = recsOf(c.id).length;
       const filled = FIELDS.filter(f => (val(c.id, f) || '').trim()).length;
       return `<div class="card st-${st}" data-id="${c.id}"><div class="crow"><div class="mark">${esc(c.mark)}</div>
       <div class="cmain" data-open="${c.id}"><div class="cname">${esc(c.name)}</div>${c.topic ? `<div class="ctopic">${esc(c.topic)}</div>` : ''}
       <span class="badge ${c.booth ? '' : 'none'}">${esc(c.booth || '부스 위치 미표기')}</span>
       <div class="cask">물어볼 것: ${esc(c.ask)}</div>
-      <div class="cstat">적은 칸 ${filled}/4 · 사진 ${np} · 명함 ${nc} · 녹음 ${nr}</div></div>
+      <div class="cstat">적은 칸 ${filled}/${FIELDS.length} · 녹음 ${nr}</div></div>
       <div class="stcol"><button class="chk s-${st}" data-cyc="${c.id}" aria-label="방문 상태 바꾸기">${STATUS[st]}</button>${sit ? `<div class="mk">${esc(marker(sit))}</div>` : ''}</div></div></div>`;
     }).join('');
     shell(CFG.title, null, `${upgradeBanner()}<div class="hint">${esc(DATA.headline)}</div>
@@ -378,9 +379,6 @@
     const c = DATA.companies.find(x => x.id === cid); if (!c) { location.hash = '#list'; return; }
     const contacts = c.contacts.length ? c.contacts.map(p => `<div class="contact"><div><b>${esc(p.name)}</b> <span class="small">${esc(p.role)}</span></div>${p.phone ? `<a class="tel" href="tel:${esc(p.phone.replace(/[^0-9+]/g, ''))}">📞 ${esc(p.phone)}</a>` : '<span class="small">번호 없음</span>'}</div>`).join('') : '<p class="small">명함 미수령 — 부스에서 담당자를 확인하세요.</p>';
     const ta = (f, ph) => `<label class="f" for="f-${f}">${FIELD_LABEL[f]}</label><textarea id="f-${f}" data-f="${f}" placeholder="${esc(ph)}">${esc(val(cid, f))}</textarea><div class="mk" id="mk-${f}">${esc(marker(item(cid, f)))}</div>`;
-    const photoBlock = (kind, label) => `<div class="sec"><h2>${label} <span class="small" id="cnt-${kind}"></span></h2>
-      <div class="btns"><label class="btn sub">📷 찍기<input type="file" accept="image/*" capture="environment" data-kind="${kind}" hidden></label>
-      <label class="btn sub">🖼 앨범에서<input type="file" accept="image/*" multiple data-kind="${kind}" hidden></label></div><div class="photos" id="ph-${kind}"></div></div>`;
     shell(c.mark + '. ' + c.name, '#list', `
       <div class="seg" id="seg">${Object.entries(STATUS).map(([k, t]) => `<button data-st="${k}">${t}</button>`).join('')}</div><div class="mk" id="mk-status" style="text-align:center"></div>
       <div class="sec" style="margin-top:10px"><h2>${esc(c.topic || c.name)}</h2><span class="badge ${c.booth ? '' : 'none'}">${esc(c.booth || '부스 위치 미표기')}</span>
@@ -388,8 +386,7 @@
       <div class="sec"><h2>물어볼 것</h2><div class="ask">${esc(c.ask)}</div>${ta('answer', '물어본 내용에 대한 답을 적어 주세요')}</div>
       <div class="sec" id="recsec"></div>
       <div class="sec"><h2>담당자</h2>${contacts}</div>
-      <div class="sec">${ta('met', '직책 · 연락처 (이름은 적어도 되고 안 적어도 돼요)')}${ta('memo', '본 것, 들은 것, 느낀 점')}${ta('followup', '누가 · 무엇을 · 언제까지')}</div>
-      ${photoBlock('photo', '현장 사진')}${photoBlock('card', '명함 사진')}`,
+      <div class="sec">${ta('met', '직책 · 연락처 (이름은 적어도 되고 안 적어도 돼요)')}</div>`,
       `<div class="savebar"><button class="btn sub" id="prev">‹ 이전</button><button class="btn" id="savebtn">저장</button><button class="btn sub" id="next">다음 ›</button></div>`);
     document.querySelectorAll('textarea[data-f]').forEach(t => t.addEventListener('input', () => { const it = setField(cid, t.dataset.f, t.value); $('#mk-' + t.dataset.f).textContent = marker(it); }));
     document.querySelectorAll('#seg [data-st]').forEach(b => b.onclick = () => { setField(cid, 'status', b.dataset.st); updateDetail(cid); });
@@ -397,11 +394,6 @@
     const i = DATA.companies.indexOf(c);
     $('#prev').onclick = () => { location.hash = i > 0 ? '#c/' + DATA.companies[i - 1].id : '#list'; };
     $('#next').onclick = () => { location.hash = i < DATA.companies.length - 1 ? '#c/' + DATA.companies[i + 1].id : '#report'; };
-    document.querySelectorAll('input[type=file][data-kind]').forEach(inp => inp.onchange = async () => {
-      const files = [...inp.files]; inp.value = ''; if (!files.length) return; toast('사진 넣는 중…'); let ok = 0;
-      for (const f of files) { try { await addPhoto(cid, inp.dataset.kind, f); ok++; } catch (err) { toast('사진 하나를 넣지 못했어요.'); } }
-      drawPhotos(cid); if (ok) toast(`사진 ${ok}장 저장했어요`); kick(100);
-    });
     PH_SIG = ''; REC_SIG = '';
     updateDetail(cid);
   }
@@ -416,7 +408,7 @@
     const st = status(cid);
     document.querySelectorAll('#seg [data-st]').forEach(b => b.className = b.dataset.st === st ? 'on s-' + st : '');
     const ms = $('#mk-status'); if (ms) ms.textContent = item(cid, 'status') ? '상태 ' + marker(item(cid, 'status')) : '';
-    drawPhotos(cid); drawRecs(cid);
+    drawRecs(cid);                       // 사진 칸은 뺐음(drawPhotos는 쓰지 않음)
   }
   function drawPhotos(cid) {
     const sig = photosOf(cid).map(p => p.id + p.ts + (p.blob ? 1 : 0) + p.kind + (p.dirty ? 'd' : '')).join();
@@ -453,13 +445,12 @@
   let RS = null, recTimer = null;
   const fmtDur = ms => { const s = Math.round((ms || 0) / 1000); return pad(Math.floor(s / 60)) + ':' + pad(s % 60); };
   function renderRecsSoon() { REC_SIG = ''; refreshView(); }
-  function parseSummary(s) { if (!s) return null; try { const o = JSON.parse(s); if (o && (o.topics || o.qa || o.actions)) return o; } catch (_) {} return { text: s }; }
+  function parseSummary(s) { if (!s) return null; try { const o = JSON.parse(s); if (o && typeof o === 'object' && !Array.isArray(o)) { if ((o.topics || []).length || (o.qa || []).length) return o; if (o.text) return { text: String(o.text) }; return { text: '요약 내용이 없어요.' }; } } catch (_) {} return { text: String(s) }; }
   function summaryHTML(o) {
     if (!o) return '';
     if (o.text) return `<div class="pre">${esc(o.text)}</div>`;
     return `${(o.topics || []).map(t => `<div class="sumt">${esc(t.title)}</div><ul>${(t.lines || []).map(l => `<li>${esc(l)}</li>`).join('')}</ul>`).join('')}
-      ${(o.qa || []).length ? `<div class="sumt">문답</div>${o.qa.map(q => `<div class="qa"><b>Q.</b> ${esc(q.q)}<br><b>A.</b> ${esc(q.a)}</div>`).join('')}` : ''}
-      ${(o.actions || []).length ? `<div class="sumt">후속 조치</div><ul>${o.actions.map(a => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}`;
+      ${(o.qa || []).length ? `<div class="sumt">문답</div>${o.qa.map(q => `<div class="qa"><b>Q.</b> ${esc(q.q)}<br><b>A.</b> ${esc(q.a)}</div>`).join('')}` : ''}`;
   }
   function summaryText(o, r) {
     if (!o) return ''; const L = [`[녹음 요약 ${r ? hhmm(new Date(r.created)) : ''}]`];
@@ -467,7 +458,6 @@
     else {
       (o.topics || []).forEach(t => { L.push('■ ' + t.title); (t.lines || []).forEach(l => L.push('- ' + l)); });
       (o.qa || []).forEach(q => L.push('Q. ' + q.q, 'A. ' + q.a));
-      if ((o.actions || []).length) { L.push('후속 조치:'); o.actions.forEach(a => L.push('- ' + a)); }
     }
     return L.join('\n');
   }
@@ -482,7 +472,7 @@
       <button class="btn big ${recording ? 'warn' : ''}" id="recbtn">${recording ? '■ 녹음 멈추기 ' + fmtDur(Date.now() - RS.start) : '● 녹음 시작'}</button>
       ${SR ? `<label class="chkline"><input type="checkbox" id="livetg" ${live ? 'checked' : ''} ${recording ? 'disabled' : ''}> 실시간 초안(브라우저 받아쓰기, 선택)</label>` : '<p class="small">이 브라우저는 실시간 초안을 지원하지 않아요. 녹음만 하면 나중에 받아쓰기·요약이 돼요.</p>'}
       ${recording && RS.sr ? `<div class="live" id="livebox">${esc(RS.draft)}<i>${esc(RS.interim || '')}</i></div>` : ''}
-      ${val(cid, 'livedraft') ? `<details class="sub"><summary>실시간 초안 <span class="mk">${esc(marker(item(cid, 'livedraft')))}</span></summary><div class="pre">${esc(val(cid, 'livedraft'))}</div><button class="btn sub" id="livetomemo">메모에 넣기</button></details>` : ''}
+      ${val(cid, 'livedraft') ? `<details class="sub"><summary>실시간 초안 <span class="mk">${esc(marker(item(cid, 'livedraft')))}</span></summary><div class="pre">${esc(val(cid, 'livedraft'))}</div></details>` : ''}
       <div id="reclist">${list.map(r => {
         const st = r.dirty && !r.path ? 'local' : r.status || 'pending'; const o = parseSummary(r.summary);
         return `<div class="rec"><div class="rhead"><b>${hhmm(new Date(r.created))} · ${fmtDur(r.duration)}</b><span class="rst rs-${st}">${REC_STATUS[st] || st}</span></div>
@@ -490,22 +480,16 @@
           <div class="btns"><button class="btn sub" data-play="${r.id}">▶ 듣기</button><button class="btn warn" data-rdel="${r.id}">지우기</button></div>
           ${st === 'failed' ? `<button class="btn sub big" data-retry="${r.id}">다시 요청</button>` : ''}
           <div id="aud-${r.id}"></div>
-          ${o ? `<div class="sumbox"><div class="sumh">녹음 요약</div>${summaryHTML(o)}<button class="btn" data-apply="${r.id}">메모에 넣기</button></div>` : ''}
+          ${o ? `<div class="sumbox"><div class="sumh">녹음 요약</div>${summaryHTML(o)}</div>` : ''}
           ${r.transcript ? `<details class="sub"><summary>받아쓰기 원문</summary><div class="pre">${esc(r.transcript)}</div></details>` : ''}</div>`;
       }).join('')}</div>`;
     $('#recbtn').onclick = () => recording ? stopRec() : startRec(cid);
     const lt = $('#livetg'); if (lt) lt.onchange = () => { localStorage.setItem(LS + 'live', lt.checked ? '1' : '0'); REC_SIG = ''; };
-    const lm = $('#livetomemo'); if (lm) lm.onclick = () => appendMemo(cid, '[실시간 초안]\n' + val(cid, 'livedraft'));
     box.querySelectorAll('[data-play]').forEach(b => b.onclick = () => playRec(b.dataset.play));
     box.querySelectorAll('[data-rdel]').forEach(b => b.onclick = async () => { if (!confirm('이 녹음을 지울까요? 받아쓰기·요약도 함께 지워지고, 다른 사람 화면에서도 사라져요.')) return; await deleteRec(b.dataset.rdel); REC_SIG = ''; drawRecs(cid); kick(100); });
     box.querySelectorAll('[data-retry]').forEach(b => b.onclick = async () => { try { const { data, error } = await sb.rpc('expo_retry_rec', { p_id: b.dataset.retry }); if (error) throw error; await applyRec(data, false); REC_SIG = ''; drawRecs(cid); } catch (e) { toast('지금은 다시 요청할 수 없어요.'); } });
-    box.querySelectorAll('[data-apply]').forEach(b => b.onclick = () => { const r = RECS[b.dataset.apply]; appendMemo(cid, summaryText(parseSummary(r.summary), r)); });
   }
-  function appendMemo(cid, text) {
-    const cur = val(cid, 'memo'); const it = setField(cid, 'memo', (cur ? cur.replace(/\s+$/, '') + '\n\n' : '') + text);
-    const t = $('#f-memo'); if (t) { t.value = it.v; $('#mk-memo').textContent = marker(it); t.scrollIntoView({ block: 'center' }); }
-    toast('메모에 넣었어요. 메모 칸에서 고칠 수 있어요.');
-  }
+
   async function startRec(cid) {
     if (RS) return;
     if (!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('이 브라우저는 녹음을 지원하지 않아요.'); return; }
@@ -563,7 +547,7 @@
   /* ---------- 보고서 (사용자 번호 없음, 녹음 원문·파일 없음) ---------- */
   const masked = () => localStorage.getItem(LS + 'mask') === '1';
   const maskPhone = s => masked() ? String(s).replace(/01[016789][- .]?\d{3,4}[- .]?\d{4}/g, '010-****-****') : s;
-  const reportModel = () => DATA.companies.map(c => ({ c, st: status(c.id), v: f => val(c.id, f), photos: photosOf(c.id, 'photo').filter(p => p.blob), cards: photosOf(c.id, 'card').filter(p => p.blob), recs: recsOf(c.id).map(r => ({ r, o: parseSummary(r.summary) })).filter(x => x.o) }));
+  const reportModel = () => DATA.companies.map(c => ({ c, st: status(c.id), v: f => val(c.id, f), recs: recsOf(c.id).map(r => ({ r, o: parseSummary(r.summary) })).filter(x => x.o) }));
   const contactLine = c => c.contacts.length ? c.contacts.map(p => `${p.name} ${p.role}${p.phone ? ' ' + maskPhone(p.phone) : ''}`).join(' · ') : '명함 미수령';
   const reportTitle = () => `KINTEX 스마트건설 EXPO 방문 보고서 — ${CFG.title}`;
   const visitDate = () => val('_meta', 'visitDate') || '2026-11-27';
@@ -576,16 +560,15 @@
       <h1>${esc(reportTitle())}</h1>
       <div class="rmeta">${COMPANY} · 방문일 ${esc(visitDate())} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${esc(fmtTime(Date.now()))}</div>
       <h2>1. 요약</h2>
-      <table><thead><tr><th style="width:8%">순서</th><th style="width:24%">업체</th><th style="width:11%">상태</th><th>후속 조치</th></tr></thead><tbody>
-      ${m.map(x => `<tr><td>${esc(x.c.mark)}</td><td>${esc(x.c.name)}</td><td>${STATUS[x.st]}</td><td class="pre">${esc(maskPhone(x.v('followup')).trim() || '—')}</td></tr>`).join('')}</tbody></table>
+      <table><thead><tr><th style="width:12%">순서</th><th>업체</th><th style="width:20%">상태</th></tr></thead><tbody>
+      ${m.map(x => `<tr><td>${esc(x.c.mark)}</td><td>${esc(x.c.name)}</td><td>${STATUS[x.st]}</td></tr>`).join('')}</tbody></table>
       <h2>2. 종합 의견</h2><div class="opinion">${esc(val('_meta', 'opinion').trim() || '—')}</div>
       <h2>3. 업체별 정리</h2>
       ${m.map(x => `<div class="co"><h3>${esc(x.c.mark)}. ${esc(x.c.name)}${x.c.topic ? ' — ' + esc(x.c.topic) : ''} <span style="font-weight:400;color:#555">(${STATUS[x.st]}${x.c.booth ? ' · ' + esc(x.c.booth) : ''})</span></h3>
         <div class="lbl">핵심 기술</div><ul>${x.c.bullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul>
-        ${field('물어볼 것:', x.c.ask)}${field('받은 답변:', x.v('answer'))}${field('만난 사람:', x.v('met'))}${field('메모:', x.v('memo'))}${field('후속 조치:', x.v('followup'))}
+        ${field('물어볼 것:', x.c.ask)}${field('받은 답변:', x.v('answer'))}${field('만난 사람:', x.v('met'))}
         ${x.recs.map(({ r, o }) => `<div class="rsum"><span class="lbl">녹음 요약 (${hhmm(new Date(r.created))}, ${fmtDur(r.duration)})</span>${summaryHTML(o)}</div>`).join('')}
         <div><span class="lbl">담당자(사전 자료):</span> ${esc(contactLine(x.c))}</div>
-        ${x.photos.length || x.cards.length ? `<div class="rph">${x.photos.map((p, i) => fig(p, '현장 사진 ' + (i + 1))).join('')}${x.cards.map((p, i) => fig(p, '명함 ' + (i + 1))).join('')}</div>` : ''}
       </div>`).join('')}
     </div>`;
   }
@@ -597,16 +580,16 @@
     for (const x of m) {
       L.push(`### ${x.c.mark}. ${x.c.name}${x.c.topic ? ' — ' + x.c.topic : ''}`, `- 상태: ${STATUS[x.st]}`, `- 부스: ${x.c.booth || '미표기'}`, '- 핵심 기술:');
       x.c.bullets.forEach(b => L.push('  - ' + b));
-      L.push(`- 물어볼 것: ${x.c.ask}`, `- 받은 답변: ${maskPhone(x.v('answer').trim()) || '-'}`, `- 만난 사람: ${maskPhone(x.v('met').trim()) || '-'}`, `- 메모: ${maskPhone(x.v('memo').trim()) || '-'}`, `- 후속 조치: ${maskPhone(x.v('followup').trim()) || '-'}`);
+      L.push(`- 물어볼 것: ${x.c.ask}`, `- 받은 답변: ${maskPhone(x.v('answer').trim()) || '-'}`, `- 만난 사람: ${maskPhone(x.v('met').trim()) || '-'}`);
       x.recs.forEach(({ r, o }) => L.push(`- 녹음 요약 (${hhmm(new Date(r.created))}, ${fmtDur(r.duration)}):`, ...sumPlain(o).split('\n').map(s => '  ' + s)));
-      L.push(`- 담당자(사전 자료): ${contactLine(x.c)}`, `- 사진 ${x.photos.length}장 · 명함 ${x.cards.length}장`, '');
+      L.push(`- 담당자(사전 자료): ${contactLine(x.c)}`, '');
     }
     return L.join('\n');
   }
   function csvText() {
     const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
-    const rows = [['순서', '업체', '주제', '부스', '상태', '물어볼 것', '받은 답변', '만난 사람', '메모', '후속 조치', '녹음 요약', '사진 수', '명함 수', '담당자(사전 자료)']];
-    for (const x of reportModel()) rows.push([x.c.mark, x.c.name, x.c.topic, x.c.booth, STATUS[x.st], x.c.ask, maskPhone(x.v('answer')), maskPhone(x.v('met')), maskPhone(x.v('memo')), maskPhone(x.v('followup')), x.recs.map(({ o }) => sumPlain(o)).join('\n---\n'), x.photos.length, x.cards.length, contactLine(x.c)]);
+    const rows = [['순서', '업체', '주제', '부스', '상태', '물어볼 것', '받은 답변', '만난 사람', '녹음 요약', '담당자(사전 자료)']];
+    for (const x of reportModel()) rows.push([x.c.mark, x.c.name, x.c.topic, x.c.booth, STATUS[x.st], x.c.ask, maskPhone(x.v('answer')), maskPhone(x.v('met')), x.recs.map(({ o }) => sumPlain(o)).join('\n---\n'), contactLine(x.c)]);
     return '\uFEFF' + rows.map(r => r.map(q).join(',')).join('\r\n') + '\r\n';
   }
   let docxP;
@@ -621,8 +604,8 @@
     kids.push(new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun({ text: reportTitle(), bold: true, size: 32 })] }));
     kids.push(P(`${COMPANY} · 방문일 ${visitDate()} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${fmtTime(Date.now())}`, { color: '555555', after: 200 }));
     kids.push(new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun('1. 요약')] }));
-    kids.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [new TableRow({ tableHeader: true, children: [cell('순서', { head: 1, w: 8 }), cell('업체', { head: 1, w: 26 }), cell('상태', { head: 1, w: 11 }), cell('후속 조치', { head: 1, w: 55 })] }),
-      ...m.map(x => new TableRow({ children: [cell(x.c.mark), cell(x.c.name), cell(STATUS[x.st]), cell(maskPhone(x.v('followup')).trim() || '—')] }))] }));
+    kids.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [new TableRow({ tableHeader: true, children: [cell('순서', { head: 1, w: 12 }), cell('업체', { head: 1, w: 68 }), cell('상태', { head: 1, w: 20 })] }),
+      ...m.map(x => new TableRow({ children: [cell(x.c.mark), cell(x.c.name), cell(STATUS[x.st])] }))] }));
     kids.push(new Paragraph({ heading: HeadingLevel.HEADING_1, spacing: { before: 240 }, children: [new TextRun('2. 종합 의견')] }));
     String(val('_meta', 'opinion').trim() || '—').split('\n').forEach(t => kids.push(P(t)));
     kids.push(new Paragraph({ heading: HeadingLevel.HEADING_1, spacing: { before: 240 }, children: [new TextRun('3. 업체별 정리')] }));
@@ -630,15 +613,9 @@
       kids.push(new Paragraph({ heading: HeadingLevel.HEADING_2, spacing: { before: 200 }, children: [new TextRun(`${x.c.mark}. ${x.c.name}${x.c.topic ? ' — ' + x.c.topic : ''}`), new TextRun({ text: `  (${STATUS[x.st]}${x.c.booth ? ' · ' + x.c.booth : ''})`, color: '666666', size: 20 })] }));
       kids.push(P('핵심 기술', { bold: true, color: '1F3A5F', after: 20 }));
       x.c.bullets.forEach(b => kids.push(new Paragraph({ bullet: { level: 0 }, children: [new TextRun(b)] })));
-      kids.push(LP('물어볼 것:', x.c.ask), LP('받은 답변:', maskPhone(x.v('answer').trim()) || '—'), LP('만난 사람:', maskPhone(x.v('met').trim()) || '—'), LP('메모:', maskPhone(x.v('memo').trim()) || '—'), LP('후속 조치:', maskPhone(x.v('followup').trim()) || '—'));
+      kids.push(LP('물어볼 것:', x.c.ask), LP('받은 답변:', maskPhone(x.v('answer').trim()) || '—'), LP('만난 사람:', maskPhone(x.v('met').trim()) || '—'));
       x.recs.forEach(({ r, o }) => kids.push(LP(`녹음 요약 (${hhmm(new Date(r.created))}, ${fmtDur(r.duration)}):`, sumPlain(o))));
       kids.push(LP('담당자(사전 자료):', contactLine(x.c)));
-      const imgs = [...x.photos.map((p, i) => [p, '현장 사진 ' + (i + 1)]), ...x.cards.map((p, i) => [p, '명함 ' + (i + 1)])];
-      for (const [p, cap] of imgs) {
-        const buf = await p.blob.arrayBuffer(); const s = Math.min(300 / p.w, 220 / p.h);
-        kids.push(new Paragraph({ alignment: AlignmentType.LEFT, children: [new ImageRun({ type: 'jpg', data: new Uint8Array(buf), transformation: { width: Math.round(p.w * s), height: Math.round(p.h * s) } })] }));
-        kids.push(P(cap, { color: '666666', size: 18 }));
-      }
     }
     const doc = new Document({ creator: COMPANY, title: reportTitle(), styles: { default: { document: { run: { font: { ascii: 'Malgun Gothic', eastAsia: '맑은 고딕', hAnsi: 'Malgun Gothic' }, size: 21 } } } },
       sections: [{ properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 1000, bottom: 1000, left: 1000, right: 1000 } } }, children: kids }] });
@@ -702,23 +679,23 @@
     if (obj.app !== CFG.id) throw new Error(`다른 앱(${obj.title || obj.app})의 백업이에요. 맞는 링크에서 불러와 주세요.`);
     if (!confirm('백업 내용을 합칠까요? 같은 칸은 더 나중에 고친 쪽이 남아요.')) return false;
     let items = obj.items || [];
-    if (obj.version === 1) { items = []; for (const [cid, e] of Object.entries(obj.entries || {})) { if (e.visited) items.push({ cid, field: 'status', v: 'done', ts: e.visitedAt || e.updatedAt, by: 0 }); FIELDS.forEach(f => e[f] && items.push({ cid, field: f, v: e[f], ts: e.updatedAt, by: 0 })); } if (obj.meta && obj.meta.opinion) items.push({ cid: '_meta', field: 'opinion', v: obj.meta.opinion, ts: obj.meta.updatedAt || Date.now(), by: 0 }); }
+    if (obj.version === 1) { items = []; for (const [cid, e] of Object.entries(obj.entries || {})) { if (e.visited) items.push({ cid, field: 'status', v: 'done', ts: e.visitedAt || e.updatedAt, by: 0 }); V1_FIELDS.forEach(f => e[f] && items.push({ cid, field: f, v: e[f], ts: e.updatedAt, by: 0 })); } if (obj.meta && obj.meta.opinion) items.push({ cid: '_meta', field: 'opinion', v: obj.meta.opinion, ts: obj.meta.updatedAt || Date.now(), by: 0 }); }
     for (const it of items) { if (newer(it, item(it.cid, it.field))) { const x = Object.assign({}, it, { dirty: true, by: it.by || myBy() }); ITEMS[key(it.cid, it.field)] = x; await saveItem(x); } }
     for (const p of obj.photos || []) { const cur = PHOTOS[p.id]; const pts = { ts: p.ts || p.created, by: p.by || 0 }; if (!cur || newer(pts, cur)) { const x = Object.assign({}, p, { ts: pts.ts, by: pts.by || myBy(), blob: p.b64 ? new Blob([b64d(p.b64)], { type: p.type || 'image/jpeg' }) : null, path: null, oldPaths: [], dirty: true, deleted: !!p.deleted }); delete x.b64; PHOTOS[x.id] = x; await savePhoto(x); } }
     for (const r of obj.recs || []) { if (!RECS[r.id] || newer(r, RECS[r.id])) { const x = Object.assign({}, r, { enc: r.b64 ? new Blob([b64d(r.b64)]) : null, path: r.b64 ? null : r.path, dirty: true }); delete x.b64; RECS[x.id] = x; await saveRec(x); } }
     kick(100); return true;
   }
   function renderMore() {
-    const np = photosOf ? Object.values(PHOTOS).filter(p => !p.deleted).length : 0, nr = Object.values(RECS).filter(r => !r.deleted).length;
+    const nr = Object.values(RECS).filter(r => !r.deleted).length;
     shell('보내기 · 설정', null, `${upgradeBanner()}
       <div class="sec"><h2>내 번호와 함께 쓰기</h2>
         <p>${ME.no ? `이 기기는 <b>사용자 ${ME.no}</b>예요. 번호는 바뀌지 않아요.` : '아직 번호가 없어요. 인터넷에 연결되면 자동으로 정해져요(그 전에 적은 것은 임시 번호로 표시돼요).'}</p>
         <p class="small">같은 링크를 연 사람끼리 실시간으로 함께 써요. 같은 칸을 둘이 고치면 더 나중에 고친 내용이 남고, 다른 칸은 둘 다 남아요. 인터넷이 끊겨도 이 기기에 저장되고, 다시 연결되면 자동으로 보내요.</p>
         <button class="btn sub big" id="syncnow">지금 맞추기</button><p class="small" id="syncinfo"></p></div>
-      <div class="sec"><h2>업체별 정리본</h2><p class="small">사진·녹음은 빠지고 글만 들어가요.</p>
+      <div class="sec"><h2>업체별 정리본</h2><p class="small">녹음은 빠지고 글만 들어가요.</p>
         <div class="btns"><button class="btn sub" id="x-txt-s">텍스트 보내기</button><button class="btn sub" id="x-txt">텍스트 받기</button>
         <button class="btn sub" id="x-csv-s">엑셀(CSV) 보내기</button><button class="btn sub" id="x-csv">엑셀(CSV) 받기</button></div></div>
-      <div class="sec"><h2>전체 백업 (사진 ${np}장 · 녹음 ${nr}개 포함)</h2>
+      <div class="sec"><h2>전체 백업 (녹음 ${nr}개 포함)</h2>
         <p class="small">서버와 별개로 손에 들고 있는 사본이에요. 카톡 등으로 보내 두거나, 다른 기기에서 ‘백업 불러오기’로 합칠 수 있어요.</p>
         <div class="btns"><button class="btn" id="b-share">백업 보내기</button><button class="btn sub" id="b-save">백업 파일 받기</button></div>
         <div class="btns one"><label class="btn sub">📂 백업 불러오기<input type="file" id="b-imp" accept=".json,application/json" hidden></label></div></div>

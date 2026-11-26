@@ -1,5 +1,5 @@
 // 오프라인용 서비스워커 (p2). 범위: /p2/  — 배포마다 tools/stamp.py가 VERSION과 ?v=를 바꿔 옛 캐시를 자동 교체
-const VERSION = 'expo-p2-20261126b';
+const VERSION = 'expo-p2-20261126c';
 const Q = '?v=' + VERSION.split('-').pop();
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon.svg', './data.enc.json',
   '../shared/app.js' + Q, '../shared/app.css' + Q, '../shared/supabase.js' + Q, '../shared/sync-config.js' + Q,

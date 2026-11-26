@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """함께 쓰기 검증: 3개 기기(A·B·C) 동시, 사진 삭제·교체, 충돌, 오프라인, 번호, 상태, 녹음(가짜 마이크+가짜 작업자).
 사용: e2e_sync.py BASE_URL TAG   (검증용 이름공간 ?ns=test → 서버 t1/t2, 실서비스 p1/p2 데이터·번호 영향 없음)"""
-import sys, os, re, json, time
+import json, sys, os, re, json, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import derive, sb_admin as A
 from playwright.sync_api import sync_playwright
@@ -59,18 +59,18 @@ with sync_playwright() as p:
     it = item(B_, C1, 'answer')
     mkB = B_.text_content('#mk-answer'); mkA = A_.text_content('#mk-answer')
     check('최종 수정 표시(A·B 화면 모두 “사용자 A번 · 시각”)', mkB == mkA == f"사용자 {nos['A']} · {hhmm(it['ts'])}", f'A:{mkA} / B:{mkB}')
-    B_.fill('#f-memo', 'B가 적은 메모 (테스트)'); t0 = time.time()
-    wait(A_, "document.querySelector('#f-memo').value.includes('B가 적은 메모')", timeout=15000)
-    check('B 편집 → A 실시간 반영', A_.text_content('#mk-memo').startswith(f"사용자 {nos['B']} ·"), f"{round(time.time()-t0,1)}초, {A_.text_content('#mk-memo')}")
+    B_.fill('#f-met', 'B가 적은 만난 사람 (테스트)'); t0 = time.time()
+    wait(A_, "document.querySelector('#f-met').value.includes('B가 적은 만난 사람')", timeout=15000)
+    check('B 편집 → A 실시간 반영', A_.text_content('#mk-met').startswith(f"사용자 {nos['B']} ·"), f"{round(time.time()-t0,1)}초, {A_.text_content('#mk-met')}")
     shot(B_, 's2_detail_markers')
     # 같은 칸 충돌: A 먼저, B 나중 → B 값
-    A_.fill('#f-followup', '후속-A (먼저)'); time.sleep(0.3); B_.fill('#f-followup', '후속-B (나중)')
+    A_.fill('#f-met', '만난분-A (먼저)'); time.sleep(0.3); B_.fill('#f-met', '만난분-B (나중)')
     time.sleep(1)
     for pg in (A_, B_, C_):
-        wait(pg, "window.__expo.state().dirty===0 && document.querySelector('#f-followup').value==='후속-B (나중)'", timeout=20000)
-    check('같은 칸 동시 편집 → 나중 값(B) 남음, 3대 모두', all(pg.input_value('#f-followup') == '후속-B (나중)' for pg in (A_, B_, C_)))
-    srv = [r for r in A.rows('expo_items', SAPP) if r['cid'] == C1 and r['field'] == 'followup'][0]
-    check('서버 값도 나중 값', A.dec_text(srv['value_enc']) == '후속-B (나중)' and srv['by_no'] == nos['B'], f"by 사용자 {srv['by_no']}")
+        wait(pg, "window.__expo.state().dirty===0 && document.querySelector('#f-met').value==='만난분-B (나중)'", timeout=20000)
+    check('같은 칸 동시 편집 → 나중 값(B) 남음, 3대 모두', all(pg.input_value('#f-met') == '만난분-B (나중)' for pg in (A_, B_, C_)))
+    srv = [r for r in A.rows('expo_items', SAPP) if r['cid'] == C1 and r['field'] == 'met'][0]
+    check('서버 값도 나중 값', A.dec_text(srv['value_enc']) == '만난분-B (나중)' and srv['by_no'] == nos['B'], f"by 사용자 {srv['by_no']}")
     # 다른 칸 동시: A met, C answer
     A_.fill('#f-met', '부장님 1명 (A)'); C_.fill('#f-answer', 'C가 고친 답변')
     for pg in (A_, B_, C_):
@@ -87,57 +87,45 @@ with sync_playwright() as p:
     check('방문 상태(미방문/방문중/완료) 실시간·대시보드', '1완료' in dash.replace(' ', '') and '1방문중' in dash.replace(' ', ''), dash)
     shot(A_, 's3_list_status')
 
-    # ---- 사진: 추가 → 삭제 → 교체
-    for pg in (A_, B_, C_): pg.goto(URL + '#c/' + C1); pg.wait_for_selector('#ph-photo', state='attached')
-    A_.set_input_files('input[data-kind=photo][multiple]', [os.path.join(IMG, 'site1.jpg'), os.path.join(IMG, 'site2.jpg')])
-    t0 = time.time()
-    wait(B_, "document.querySelectorAll('#ph-photo img').length===2", timeout=30000)
-    check('A 사진 2장 추가 → B 표시', True, f'{round(time.time()-t0,1)}초')
-    wait(A_, "window.__expo.state().dirty===0", timeout=20000)
-    phs = [x for x in st(A_)['photos'] if not x['deleted']]; phs.sort(key=lambda x: x['ts'])
-    p_del, p_rep = phs[0], phs[1]
-    check('사진 Storage 업로드(암호화)', all(A.storage_exists(x['path']) for x in phs) and A.storage_get(p_rep['path'])[1][:3] != b'\xff\xd8\xff', '암호문(JPEG 헤더 아님)')
-    A_.click(f'[data-del="{p_del["id"]}"]'); t0 = time.time()
-    wait(B_, "document.querySelectorAll('#ph-photo img').length===1", timeout=20000)
-    wait(A_, "window.__expo.state().dirty===0", timeout=20000); time.sleep(1)
-    srvp = [r for r in A.rows('expo_photos', SAPP) if r['id'] == p_del['id']][0]
-    check('A 사진 삭제 → B에서 사라짐 + 삭제 표시(tombstone) + Storage 파일 삭제', srvp['deleted'] and not A.storage_exists(p_del['path']), f'{round(time.time()-t0,1)}초')
-    A_.set_input_files(f'input[data-rep="{p_rep["id"]}"]', os.path.join(IMG, 'card1.jpg')); t0 = time.time()
-    wait(B_, f"(()=>{{const p=window.__expo.state().photos.find(x=>x.id==='{p_rep['id']}');return p&&p.ts>{p_rep['ts']}&&p.hasBlob&&p.h===933}})()", timeout=30000)
-    wait(A_, "window.__expo.state().dirty===0", timeout=20000); time.sleep(1)
-    newp = [x for x in st(A_)['photos'] if x['id'] == p_rep['id']][0]
-    check('A 사진 교체 → B에 새 사진 + 옛 Storage 파일 삭제', A.storage_exists(newp['path']) and not A.storage_exists(p_rep['path']), f'{round(time.time()-t0,1)}초')
-    mk = B_.eval_on_selector_all('#ph-photo .mk', 'e=>e.map(x=>x.textContent)')
-    check('사진 아래 최종 수정 표시', mk and mk[0].startswith(f"사용자 {nos['A']} ·"), mk)
-    B_.evaluate("document.querySelector('#ph-photo').scrollIntoView({block:'center'})"); shot(B_, 's4_photo_replaced')
+    # ---- 뺀 항목(자유 메모·후속 조치·현장 사진·명함 사진) + 옛 기록 호환
+    now_ms = int(time.time() * 1000)
+    A.call('POST', '/rest/v1/expo_items', [{'app': SAPP, 'cid': C1, 'field': 'memo', 'value_enc': A.enc_text('옛 메모값(보이면 안 됨)'), 'ts': now_ms, 'by_no': 99},
+                                         {'app': SAPP, 'cid': C1, 'field': 'followup', 'value_enc': A.enc_text('옛 후속조치값(보이면 안 됨)'), 'ts': now_ms, 'by_no': 99}], headers={'Prefer': 'return=minimal'})
+    A.call('POST', '/rest/v1/expo_photos', {'id': C1 + '-photo-legacy', 'app': SAPP, 'cid': C1, 'kind': 'photo', 'path': None, 'w': 10, 'h': 10, 'created': now_ms, 'ts': now_ms, 'by_no': 99, 'deleted': False}, headers={'Prefer': 'return=minimal'})
+    for pg in (A_, B_, C_): pg.goto(URL + '#c/' + C1); pg.wait_for_selector('#seg')
+    wait(B_, "window.__expo.state().items.some(i=>i.field==='memo')", timeout=20000); time.sleep(1)
+    body = B_.text_content('main')
+    gone = all(B_.query_selector(sel) is None for sel in ('#f-memo', '#f-followup', '#ph-photo', '#ph-card', 'input[type=file]', '[data-apply]', '#livetomemo'))
+    gone = gone and not any(w in body for w in ('자유 메모', '후속 조치', '현장 사진', '명함 사진', '옛 메모값', '옛 후속조치값', '메모에 넣기'))
+    check('상세 화면: 자유 메모·후속 조치·현장 사진·명함 사진 칸 없음, 옛 값(메모·사진) 들어와도 표시·오류 없음', gone)
+    B_.evaluate("window.scrollTo(0, document.body.scrollHeight)"); time.sleep(0.3); shot(B_, 's4_detail_no_removed_items')
 
     # ---- 오프라인 → 재연결
     devs['B'][0].set_offline(True); time.sleep(0.5)
-    B_.goto(URL + '#c/' + C3); B_.wait_for_selector('#f-memo')
-    B_.fill('#f-memo', 'B 오프라인 메모'); B_.set_input_files('input[data-kind=card][capture]', os.path.join(IMG, 'card1.jpg'))
-    B_.wait_for_selector('#ph-card img')
+    B_.goto(URL + '#c/' + C3); B_.wait_for_selector('#f-met')
+    B_.fill('#f-met', 'B 오프라인 만난 사람')
     net = B_.text_content('#net')
     A_.goto(URL + '#c/' + C3); A_.wait_for_selector('#f-answer'); A_.fill('#f-answer', 'A 온라인 답변')
     time.sleep(2)
     check('오프라인 중 표시(보낼 것 n건)', '오프라인' in net, net)
     devs['B'][0].set_offline(False); B_.evaluate("window.dispatchEvent(new Event('online'))"); t0 = time.time()
-    wait(A_, "document.querySelector('#f-memo').value==='B 오프라인 메모' && document.querySelectorAll('#ph-card img').length===1", timeout=40000)
+    wait(A_, "document.querySelector('#f-met').value==='B 오프라인 만난 사람'", timeout=40000)
     wait(B_, "document.querySelector('#f-answer').value==='A 온라인 답변'", timeout=40000)
-    check('오프라인 편집·사진 → 재연결 후 동기화(양방향)', True, f'{round(time.time()-t0,1)}초')
+    check('오프라인 편집 → 재연결 후 동기화(양방향)', True, f'{round(time.time()-t0,1)}초')
     shot(B_, 's5_after_reconnect')
 
     # ---- 임시 번호 (서버에 못 닿는 첫 실행)
     ctxD, D = device()
     D.route(re.compile(r'.*supabase\.co.*'), lambda r: r.abort())
     D.goto(URL); D.wait_for_selector('#pw'); D.fill('#pw', PW); D.click('#lbtn'); D.wait_for_selector('#cards')
-    D.goto(URL + '#c/' + C2); D.wait_for_selector('#f-memo'); D.fill('#f-memo', 'D 임시번호 메모'); time.sleep(1)
-    tmp_ok = '임시' in D.text_content('#me') and D.text_content('#mk-memo').startswith('사용자 ?(임시)')
+    D.goto(URL + '#c/' + C2); D.wait_for_selector('#f-met'); D.fill('#f-met', 'D 임시번호 만난 사람'); time.sleep(1)
+    tmp_ok = '임시' in D.text_content('#me') and D.text_content('#mk-met').startswith('사용자 ?(임시)')
     D.unroute(re.compile(r'.*supabase\.co.*')); D.evaluate("window.__expo.syncNow()")
     wait(D, "window.__expo.state().me.no && window.__expo.state().dirty===0", timeout=40000)
     dno = st(D)['me']['no']
-    wait(A_, "true"); A_.goto(URL + '#c/' + C2); A_.wait_for_selector('#f-memo')
-    wait(A_, "document.querySelector('#f-memo').value==='D 임시번호 메모'", timeout=20000)
-    check('연결 안 될 때 임시 번호 → 연결 후 진짜 번호로 바뀌어 전송', tmp_ok and A_.text_content('#mk-memo').startswith(f'사용자 {dno} ·'), f'임시표시={tmp_ok}, 부여={dno}, A화면={A_.text_content("#mk-memo")}')
+    wait(A_, "true"); A_.goto(URL + '#c/' + C2); A_.wait_for_selector('#f-met')
+    wait(A_, "document.querySelector('#f-met').value==='D 임시번호 만난 사람'", timeout=20000)
+    check('연결 안 될 때 임시 번호 → 연결 후 진짜 번호로 바뀌어 전송', tmp_ok and A_.text_content('#mk-met').startswith(f'사용자 {dno} ·'), f'임시표시={tmp_ok}, 부여={dno}, A화면={A_.text_content("#mk-met")}')
     ctxD.close()
 
     # ---- 녹음 (가짜 마이크)
@@ -173,13 +161,24 @@ with sync_playwright() as p:
         for pg in (A_, B_): wait(pg, "!!document.querySelector('.sumbox')", timeout=20000)
     check('작업 대기→처리→완료, 요약이 Realtime으로 A·B에 표시', ok_done and B_.query_selector('.sumbox') is not None, f"처리: {who_done}, {round(time.time()-t0)}초, 처리중 관찰={seen_proc}, 상태={row['status']} {row.get('error') or ''}")
     if ok_done:
-        A_.click('[data-apply]'); wait(B_, "document.querySelector('#f-memo').value.includes('[녹음 요약')", timeout=15000)
-        check('‘메모에 넣기’ → 메모 칸에 들어가고 B에도 반영(편집 가능)', '[녹음 요약' in B_.input_value('#f-memo'))
+        # 요약 표시: actions 있어도(옛 작업자) 숨김 / actions 없음 / 빈 actions / actions만 있는 경우
+        base = {'v': 1, 'topics': [{'title': '장비 임대 조건', 'lines': ['월 단위 임대 가능', '데이터는 원본 제공']}], 'qa': [{'q': '데이터 제공 조건은?', 'a': '원본 제공 (테스트)'}]}
+        cases = [('actions 있음', dict(base, actions=['견적 요청 (보이면 안 됨)'])), ('actions 없음', base), ('actions 빈 배열', dict(base, actions=[])), ('actions만', {'v': 1, 'actions': ['x']})]
+        res = []
+        for name, sm in cases:
+            A.call('PATCH', f"/rest/v1/expo_recordings?id=eq.{rec['id']}", {'summary_enc': A.enc_text(json.dumps(sm, ensure_ascii=False)), 'ts': int(time.time() * 1000)}, headers={'Prefer': 'return=minimal'})
+            want = '요약 내용이 없어요' if name == 'actions만' else '장비 임대 조건'
+            try:
+                wait(B_, "[...document.querySelectorAll('#reclist .sumbox')].some(e=>e.textContent.includes(%r))" % want, timeout=20000)
+                sbx = B_.text_content('#reclist .sumbox'); ok_ = '후속 조치' not in sbx and '견적 요청' not in sbx and (want in sbx) and (name == 'actions만' or '문답' in sbx)
+            except Exception as e: ok_ = False; sbx = str(e)[:80]
+            res.append((name, ok_))
+            if name == 'actions 있음': B_.evaluate("document.querySelector('#recsec').scrollIntoView()"); time.sleep(0.3); shot(B_, 's6_recording_summary')
+        check('녹음 요약 표시(주제·문답) — 후속 조치 없음, actions 비어도/없어도 동작, ‘메모에 넣기’ 버튼 없음', all(o for _, o in res) and B_.query_selector('[data-apply]') is None, str(res))
         # 받아쓰기 원문 표시: 서버 행에 원문을 넣어 Realtime으로 화면 갱신 확인(가짜 마이크는 삐 소리라 실제 원문이 비어 있을 수 있음)
         A.call('PATCH', f"/rest/v1/expo_recordings?id=eq.{rec['id']}", {'transcript_enc': A.enc_text('받아쓰기 원문 표시 확인용 문장입니다.')}, headers={'Prefer': 'return=minimal'})
         wait(B_, "[...document.querySelectorAll('#reclist details.sub')].some(d=>d.textContent.includes('받아쓰기 원문 표시 확인용') && !d.open)", timeout=20000)
         check('받아쓰기 원문은 접힌 상자(<details>)에, Realtime 갱신', True)
-    B_.evaluate("document.querySelector('#recsec').scrollIntoView()"); time.sleep(0.3); shot(B_, 's6_recording_summary')
     # 오프라인 녹음
     devs['B'][0].set_offline(True); time.sleep(0.3)
     B_.click('#recbtn'); time.sleep(2.2); B_.click('#recbtn'); time.sleep(0.8)
@@ -193,6 +192,8 @@ with sync_playwright() as p:
     trs = [A.dec_text(r['transcript_enc']) for r in A.rows('expo_recordings', SAPP) if r['id'] == rec['id'] and r['transcript_enc']]
     ok = ('완료' in rep and '방문중' in rep and '녹음 요약 (' in rep and not any(t and t[:20] in rep for t in trs) and '사용자 ' not in rep)
     check('보고서: 상태·녹음 요약·문답 포함, 받아쓰기 원문·사용자 번호 없음', ok)
+    nogone = not any(w in rep for w in ('자유 메모', '메모:', '후속 조치', '현장 사진', '명함 1', '옛 메모값', '옛 후속조치값')) and A_.eval_on_selector_all('#preview img', 'e=>e.length') == 0
+    check('보고서: 자유 메모·후속 조치·현장 사진·명함 사진 없음(옛 값 있어도)', nogone)
     A_.evaluate("document.querySelector('.rsum') && document.querySelector('.rsum').scrollIntoView({block:'center'})"); time.sleep(0.3); shot(A_, 's7_report')
     A_.goto(URL + '#c/' + C1); A_.wait_for_selector('#recbtn')
     # 녹음 삭제
