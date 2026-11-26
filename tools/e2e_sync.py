@@ -35,16 +35,20 @@ with sync_playwright() as p:
         pg.on('dialog', lambda d: d.accept())
         return ctx, pg
     devs = {n: device() for n in 'ABC'}
-    for n, (ctx, pg) in devs.items():
-        pg.goto(URL); pg.wait_for_selector('#pw', timeout=30000); pg.fill('#pw', PW); pg.click('#lbtn'); pg.wait_for_selector('#cards', timeout=40000)
+    def login(pg, idx):
+        pg.goto(URL); pg.wait_for_selector('#pw', timeout=30000); pg.fill('#pw', PW); pg.click('#lbtn')
+        pg.wait_for_selector('[data-pick]', timeout=40000); pg.click(f'[data-pick] >> nth={idx}'); pg.wait_for_selector('#cards', timeout=40000)
+    for i, (n, (ctx, pg)) in enumerate(devs.items()): login(pg, i)
     for n, (ctx, pg) in devs.items():
         wait(pg, 'window.__expo.state().me.no && window.__expo.state().net.connected', timeout=40000)
     A_, B_, C_ = (devs[n][1] for n in 'ABC')
     nos = {n: st(devs[n][1])['me']['no'] for n in 'ABC'}
     check('사용자 번호 자동 부여(서로 다름·연속)', len(set(nos.values())) == 3 and sorted(nos.values()) == list(range(min(nos.values()), min(nos.values()) + 3)), nos)
-    check('머리글 “나: 사용자 N” 표시', all(f'나: 사용자 {nos[n]}' in devs[n][1].text_content('#me') for n in 'ABC'))
+    NM = {n: st(devs[n][1])['myname'] for n in 'ABC'}
+    check('머리글 “나: 이름” 표시(번호 안 보임, 3명 서로 다름)', len(set(NM.values())) == 3 and all(devs[n][1].text_content('#me') == '나: ' + NM[n] for n in 'ABC'))
     for n in 'ABC': wait(devs[n][1], 'window.__expo.state().net.peers.length>=3', timeout=20000)
-    check('접속자 표시(presence) 3명', all(len(st(devs[n][1])['net']['peers']) >= 3 for n in 'ABC'), A_.text_content('#peers'))
+    wait(A_, "document.querySelector('#peers').textContent.split(',').length>=3 && !document.querySelector('#peers').textContent.includes('사용자')", timeout=20000)
+    check('접속자 표시(presence) 3명, 이름으로', all(len(st(devs[n][1])['net']['peers']) >= 3 for n in 'ABC') and all(NM[n] in A_.text_content('#peers') for n in 'ABC'), str(len(A_.text_content('#peers'))))
     shot(A_, 's1_list_presence')
     # 번호 유지: 새로고침 후 같은 번호
     B_.reload(); B_.wait_for_selector('#cards'); wait(B_, 'window.__expo.state().net.connected', timeout=30000)
@@ -58,10 +62,10 @@ with sync_playwright() as p:
     wait(C_, "document.querySelector('#f-answer').value.includes('A가 적은 답변')", timeout=15000)
     it = item(B_, C1, 'answer')
     mkB = B_.text_content('#mk-answer'); mkA = A_.text_content('#mk-answer')
-    check('최종 수정 표시(A·B 화면 모두 “사용자 A번 · 시각”)', mkB == mkA == f"사용자 {nos['A']} · {hhmm(it['ts'])}", f'A:{mkA} / B:{mkB}')
+    check('최종 수정 표시(A·B 화면 모두 “사용자 A번 · 시각”)', mkB == mkA == f"{NM['A']} · {hhmm(it['ts'])}", f'A:{mkA} / B:{mkB}')
     B_.fill('#f-met', 'B가 적은 만난 사람 (테스트)'); t0 = time.time()
     wait(A_, "document.querySelector('#f-met').value.includes('B가 적은 만난 사람')", timeout=15000)
-    check('B 편집 → A 실시간 반영', A_.text_content('#mk-met').startswith(f"사용자 {nos['B']} ·"), f"{round(time.time()-t0,1)}초, {A_.text_content('#mk-met')}")
+    check('B 편집 → A 실시간 반영', A_.text_content('#mk-met').startswith(f"{NM['B']} ·"), f"{round(time.time()-t0,1)}초, {A_.text_content('#mk-met')}")
     shot(B_, 's2_detail_markers')
     # 같은 칸 충돌: A 먼저, B 나중 → B 값
     A_.fill('#f-met', '만난분-A (먼저)'); time.sleep(0.3); B_.fill('#f-met', '만난분-B (나중)')
@@ -117,15 +121,15 @@ with sync_playwright() as p:
     # ---- 임시 번호 (서버에 못 닿는 첫 실행)
     ctxD, D = device()
     D.route(re.compile(r'.*supabase\.co.*'), lambda r: r.abort())
-    D.goto(URL); D.wait_for_selector('#pw'); D.fill('#pw', PW); D.click('#lbtn'); D.wait_for_selector('#cards')
+    login(D, 0)
     D.goto(URL + '#c/' + C2); D.wait_for_selector('#f-met'); D.fill('#f-met', 'D 임시번호 만난 사람'); time.sleep(1)
-    tmp_ok = '임시' in D.text_content('#me') and D.text_content('#mk-met').startswith('사용자 ?(임시)')
+    tmp_ok = not st(D)['me']['no'] and D.text_content('#mk-met').startswith(NM['A'] + ' ·')
     D.unroute(re.compile(r'.*supabase\.co.*')); D.evaluate("window.__expo.syncNow()")
     wait(D, "window.__expo.state().me.no && window.__expo.state().dirty===0", timeout=40000)
     dno = st(D)['me']['no']
     wait(A_, "true"); A_.goto(URL + '#c/' + C2); A_.wait_for_selector('#f-met')
     wait(A_, "document.querySelector('#f-met').value==='D 임시번호 만난 사람'", timeout=20000)
-    check('연결 안 될 때 임시 번호 → 연결 후 진짜 번호로 바뀌어 전송', tmp_ok and A_.text_content('#mk-met').startswith(f'사용자 {dno} ·'), f'임시표시={tmp_ok}, 부여={dno}, A화면={A_.text_content("#mk-met")}')
+    check('연결 안 될 때 임시 번호 → 연결 후 진짜 번호로 바뀌어 전송', tmp_ok and A_.text_content('#mk-met').startswith(NM['A'] + ' ·'), f'임시표시={tmp_ok}, 부여={dno}, A화면={A_.text_content("#mk-met")}')
     ctxD.close()
 
     # ---- 녹음 (가짜 마이크)
@@ -224,8 +228,8 @@ with sync_playwright() as p:
     A_.goto(URL + '#report'); A_.wait_for_selector('#preview .rep'); time.sleep(0.8)
     rep = A_.text_content('#preview')
     trs = [A.dec_text(r['transcript_enc']) for r in A.rows('expo_recordings', SAPP) if r['id'] == rec['id'] and r['transcript_enc']]
-    ok = ('완료' in rep and '방문중' in rep and '녹음 요약 (' in rep and not any(t and t[:20] in rep for t in trs) and '사용자 ' not in rep)
-    check('보고서: 상태·녹음 요약·문답 포함, 받아쓰기 원문·사용자 번호 없음', ok)
+    ok = ('완료' in rep and '방문중' in rep and '녹음 요약 (' in rep and not any(t and t[:20] in rep for t in trs) and '사용자 ' not in rep and ('작성자 ' in rep and all(NM[n] in rep for n in 'AB')))
+    check('보고서: 상태·녹음 요약·문답 포함, 받아쓰기 원문·사용자 번호 없음, 작성자 이름 표시', ok)
     nogone = not any(w in rep for w in ('자유 메모', '메모:', '후속 조치', '현장 사진', '명함 1', '옛 메모값', '옛 후속조치값')) and A_.eval_on_selector_all('#preview img', 'e=>e.length') == 0
     check('보고서: 자유 메모·후속 조치·현장 사진·명함 사진 없음(옛 값 있어도)', nogone)
     A_.evaluate("document.querySelector('.rsum') && document.querySelector('.rsum').scrollIntoView({block:'center'})"); time.sleep(0.3); shot(A_, 's7_report')

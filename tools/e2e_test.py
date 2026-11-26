@@ -17,7 +17,7 @@ for a in ('p1', 'p2'):
         for p in c['contacts']:
             if p['phone']: REAL_PHONES.add(p['phone'])
 EXPECT = {a: [c['name'] for c in json.load(open(os.path.join(ROOT, 'data_src', a + '.json')))['companies']] for a in ('p1', 'p2')}
-TITLES = {'p1': '1순위 · 사장님 방문 동선', 'p2': '2순위 방문 동선'}
+TITLES = {'p1': '대표이사 방문동선', 'p2': '후순위 방문동선'}
 R = []
 def check(name, ok, detail=''):
     R.append((name, bool(ok), detail)); print(('PASS' if ok else 'FAIL'), name, ('— ' + detail) if detail else '', flush=True)
@@ -28,6 +28,7 @@ def download(page, selector):
     with page.expect_download(timeout=30000) as d: page.click(selector)
     dl = d.value; path = os.path.join(DL, dl.suggested_filename); dl.save_as(path); return path
 
+app_shot_pick = {}
 def unlock(page, app, wrong_first=False):
     page.goto(f'{BASE}/{app}/?ns=test', wait_until='domcontentloaded')
     page.wait_for_selector('#pw', timeout=20000)
@@ -36,7 +37,13 @@ def unlock(page, app, wrong_first=False):
         page.wait_for_function("document.querySelector('#lerr') && document.querySelector('#lerr').textContent.length>0", timeout=20000)
         check(f'[{app}] 틀린 비밀번호 거부', '맞지 않아요' in page.text_content('#lerr'), page.text_content('#lerr'))
     page.fill('#pw', PW); page.click('#lbtn')
-    page.wait_for_selector('#cards', timeout=30000)
+    page.wait_for_selector('[data-pick], #cards', timeout=30000)
+    if page.query_selector('[data-pick]'):
+        n_pick = len(page.query_selector_all('[data-pick]'))
+        if app_shot_pick.get(app) is None: app_shot_pick[app] = 1; shot(page, f'{app}_0b_pick_name')
+        page.click('[data-pick] >> nth=1'); page.wait_for_selector('#cards', timeout=30000)
+        nm = page.evaluate('window.__expo.state().myname')
+        check(f'[{app}] 잠금 해제 후 이름 고르기(3명) → 머리글에 이름', n_pick == 3 and nm and page.text_content('#me') == '나: ' + nm and '사용자' not in page.text_content('#me'))
 
 with sync_playwright() as p:
     br = p.chromium.launch(args=['--disable-dev-shm-usage'])

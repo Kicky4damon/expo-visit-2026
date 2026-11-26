@@ -85,7 +85,10 @@
   const val = (cid, f, d = '') => { const it = item(cid, f); return it ? it.v : d; };
   const status = cid => val(cid, 'status', 'none') || 'none';
   const myBy = () => ME.no || 0;
-  const who = by => by ? '사용자 ' + by : '사용자 ?(임시)';
+  // 이름: 기기마다 한 번 고름(kv 'myname'). 다른 사람에게는 '_users' 항목(n<번호> = 이름)으로 동기화. 화면에는 번호 대신 이름만
+  let MYNAME = '', PEOPLE = [];
+  const nameOf = by => (by && by === ME.no && MYNAME) ? MYNAME : (by ? val('_users', 'n' + by) : MYNAME);
+  const who = by => nameOf(by) || (by ? '사용자 ' + by : '사용자 ?(임시)');
   const marker = obj => obj && obj.ts ? `${who(obj.by)} · ${hhmm(new Date(obj.ts))}` : '';
   const photosOf = (cid, kind) => Object.values(PHOTOS).filter(p => p.cid === cid && !p.deleted && (!kind || p.kind === kind)).sort((a, b) => a.created - b.created);
   const recsOf = cid => Object.values(RECS).filter(r => r.cid === cid && !r.deleted).sort((a, b) => a.created - b.created);
@@ -130,6 +133,7 @@
     for (const p of await idbAll('photos')) PHOTOS[p.id] = p;
     for (const r of await idbAll('recs')) RECS[r.id] = r;
     ME = (await idbGet('kv', 'me')) || ME;
+    MYNAME = (await idbGet('kv', 'myname')) || ''; PEOPLE = (await idbGet('kv', 'people')) || [];
     SKEY = (await idbGet('kv', 'skey')) || null; AUTHPW = (await idbGet('kv', 'authpw')) || null;
     lastSaved = Math.max(0, ...Object.values(ITEMS).map(x => x.ts || 0));
     await migrateV1();
@@ -172,6 +176,15 @@
     const r = await sb.auth.signInWithPassword({ email: SC.authEmail, password: AUTHPW });
     if (r.error) throw r.error; return r.data.session;
   }
+  function publishName() { if (ME.no && MYNAME && val('_users', 'n' + ME.no) !== MYNAME) setField('_users', 'n' + ME.no, MYNAME); }
+  async function loadPeople() {   // 이름 목록: shared/people.enc.txt (공용 키로 암호화, 저장소에 평문 없음)
+    try { const t = await (await fetch('../shared/people.enc.txt', { cache: 'no-cache' })).text(); const a = JSON.parse(await decText(t.trim())); if (Array.isArray(a) && a.length) { PEOPLE = a; await idbPut('kv', a, 'people'); } } catch (_) {}
+  }
+  async function pickName(n) {
+    MYNAME = n; await idbPut('kv', n, 'myname'); publishName();
+    if (chan && ME.no) chan.track({ no: ME.no, name: MYNAME });
+    renderMe(); renderNet(); kick(50);
+  }
   async function ensureNumber() {
     if (ME.no) return;
     const { data, error } = await sb.rpc('expo_next_user', { p_app: SYNC_APP });
@@ -181,7 +194,7 @@
     for (const it of Object.values(ITEMS)) if (it.dirty && !it.by) { it.by = ME.no; await saveItem(it); }
     for (const p of Object.values(PHOTOS)) if (p.dirty && !p.by) { p.by = ME.no; await savePhoto(p); }
     for (const r of Object.values(RECS)) if (r.dirty && !r.by) { r.by = ME.no; await saveRec(r); }
-    if (chan) chan.track({ no: ME.no });
+    if (chan) chan.track({ no: ME.no, name: MYNAME });
     renderMe(); refreshView();
   }
   function subscribe() {
@@ -192,12 +205,12 @@
       .on('postgres_changes', { event: '*', schema: 'public', table: 'expo_photos', filter: filt }, p => p.new && p.new.id && applyPhoto(p.new).then(refreshView))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'expo_recordings', filter: filt }, p => p.new && p.new.id && applyRec(p.new).then(refreshView))
       .on('presence', { event: 'sync' }, () => {
-        const st = chan.presenceState(); const nos = new Set();
-        Object.values(st).forEach(arr => arr.forEach(m => { if (m.no) nos.add(m.no); }));
-        NET.peers = [...nos].sort((a, b) => a - b); renderNet();
+        const st = chan.presenceState(); const nos = new Map();
+        Object.values(st).forEach(arr => arr.forEach(m => { if (m.no) nos.set(m.no, m.name || ''); }));
+        NET.peers = [...nos.keys()].sort((a, b) => a - b); NET.peerNames = nos; renderNet();
       })
       .subscribe(async s => {
-        if (s === 'SUBSCRIBED') { NET.connected = true; renderNet(); if (ME.no) chan.track({ no: ME.no }); pullAll().then(() => kick(50)); }
+        if (s === 'SUBSCRIBED') { NET.connected = true; renderNet(); if (ME.no) chan.track({ no: ME.no, name: MYNAME }); pullAll().then(() => kick(50)); }
         else if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT' || s === 'CLOSED') { NET.connected = false; renderNet(); }
       });
   }
@@ -206,7 +219,7 @@
     if (!syncReady() || syncing || !navigator.onLine) { renderNet(); return; }
     syncing = true;
     try {
-      await ensureSession(); await ensureNumber(); subscribe();
+      await ensureSession(); await ensureNumber(); publishName(); subscribe();
       await pushAll();
       NET.lastSync = Date.now(); NET.err = '';
     } catch (e) { NET.err = (e && (e.message || e.error_description)) || String(e); console.warn('sync', e); }
@@ -216,7 +229,8 @@
   setInterval(() => { if (syncReady() && navigator.onLine && (dirtyCount() || !isConn())) syncNow(); }, 10000);
 
   async function pushAll() {
-    for (const it of Object.values(ITEMS)) if (it.dirty) {
+    const order = Object.values(ITEMS).sort((a, b) => (b.cid === '_users') - (a.cid === '_users'));   // 이름을 먼저 보내 상대 화면에 번호 대신 이름이 바로 보이게
+    for (const it of order) if (it.dirty) {
       const ts = it.ts, by = it.by;
       const { data, error } = await sb.rpc('expo_put_item', { p_app: SYNC_APP, p_cid: it.cid, p_field: it.field, p_value: await encText(it.v), p_ts: ts, p_by: by });
       if (error) throw error;
@@ -306,7 +320,7 @@
     renderNet();
   }
   function showSaved() { const el = $('#saved'); if (el) el.textContent = lastSaved ? '저장됨 ' + hhmmss(new Date(lastSaved)) : '자동 저장'; }
-  function renderMe() { const el = $('#me'); if (el) el.textContent = ME.no ? '나: 사용자 ' + ME.no : '나: 임시 번호'; }
+  function renderMe() { const el = $('#me'); if (el) el.textContent = MYNAME ? '나: ' + MYNAME : (ME.no ? '나: 사용자 ' + ME.no : '나: 임시 번호'); }
   function renderNet() {
     renderMe();
     const el = $('#net'); if (!el) return;
@@ -318,7 +332,7 @@
     else if (NET.connected) { cls = 'on'; txt = n ? `보내는 중 ${n}건` : '실시간 연결됨'; }
     else txt = '연결 중…';
     el.className = 'net ' + cls; el.textContent = txt;
-    const pe = $('#peers'); if (pe) pe.textContent = NET.connected && NET.peers.length ? '접속: ' + NET.peers.map(n => '사용자 ' + n).join(', ') : '';
+    const pe = $('#peers'); if (pe) pe.textContent = NET.connected && NET.peers.length ? '접속: ' + NET.peers.map(n => (NET.peerNames && NET.peerNames.get(n)) || who(n)).join(', ') : '';
   }
   function shell(title, back, body, nav) {
     document.body.className = CFG.id;
@@ -555,6 +569,8 @@
   const maskPhone = s => masked() ? String(s).replace(/01[016789][- .]?\d{3,4}[- .]?\d{4}/g, '010-****-****') : s;
   const reportModel = () => DATA.companies.map(c => ({ c, st: status(c.id), v: f => val(c.id, f), recs: recsOf(c.id).map(r => ({ r, o: parseSummary(r.summary) })).filter(x => x.o) }));
   const contactLine = c => c.contacts.length ? c.contacts.map(p => `${p.name} ${p.role}${p.phone ? ' ' + maskPhone(p.phone) : ''}`).join(' · ') : '명함 미수령';
+  const writers = () => { const bys = new Set(); Object.values(ITEMS).forEach(i => { if (i.cid !== '_users' && i.v) bys.add(i.by); }); Object.values(RECS).forEach(r => { if (!r.deleted) bys.add(r.by); }); return [...new Set([...bys].map(nameOf).filter(Boolean))].join(', '); };
+  const writerPart = () => writers() ? ' · 작성자 ' + writers() : '';
   const reportTitle = () => `KINTEX 스마트건설 EXPO 방문 보고서 — ${CFG.title}`;
   const visitDate = () => val('_meta', 'visitDate') || '2026-11-27';
   const counts = m => { const c = { none: 0, doing: 0, done: 0 }; m.forEach(x => c[x.st]++); return c; };
@@ -564,7 +580,7 @@
     const field = (lbl, v) => `<div><span class="lbl">${lbl}</span> <span class="pre">${esc(maskPhone(v || '').trim() || '—')}</span></div>`;
     return `<div class="rep" id="rep">
       <h1>${esc(reportTitle())}</h1>
-      <div class="rmeta">${COMPANY} · 방문일 ${esc(visitDate())} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${esc(fmtTime(Date.now()))}</div>
+      <div class="rmeta">${COMPANY}${esc(writerPart())} · 방문일 ${esc(visitDate())} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${esc(fmtTime(Date.now()))}</div>
       <h2>1. 요약</h2>
       <table><thead><tr><th style="width:12%">순서</th><th>업체</th><th style="width:20%">상태</th></tr></thead><tbody>
       ${m.map(x => `<tr><td>${esc(x.c.mark)}</td><td>${esc(x.c.name)}</td><td>${STATUS[x.st]}</td></tr>`).join('')}</tbody></table>
@@ -581,7 +597,7 @@
   function sumPlain(o) { return summaryText(o).split('\n').slice(1).join('\n'); }
   function reportText() {
     const m = reportModel(); const n = counts(m); const L = [];
-    L.push('# ' + reportTitle(), '', `${COMPANY} · 방문일 ${visitDate()} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${fmtTime(Date.now())}`, '');
+    L.push('# ' + reportTitle(), '', `${COMPANY}${writerPart()} · 방문일 ${visitDate()} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${fmtTime(Date.now())}`, '');
     L.push('## 종합 의견', '', val('_meta', 'opinion').trim() || '-', '', '## 업체별 정리', '');
     for (const x of m) {
       L.push(`### ${x.c.mark}. ${x.c.name}${x.c.topic ? ' — ' + x.c.topic : ''}`, `- 상태: ${STATUS[x.st]}`, `- 부스: ${x.c.booth || '미표기'}`, '- 핵심 기술:');
@@ -608,7 +624,7 @@
     const cell = (t, o = {}) => new TableCell({ width: o.w ? { size: o.w, type: WidthType.PERCENTAGE } : undefined, shading: o.head ? { fill: 'EEF2F7' } : undefined, children: String(t).split('\n').map(s => new Paragraph({ children: [new TextRun({ text: s, bold: o.head })] })) });
     const m = reportModel(); const n = counts(m); const kids = [];
     kids.push(new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun({ text: reportTitle(), bold: true, size: 32 })] }));
-    kids.push(P(`${COMPANY} · 방문일 ${visitDate()} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${fmtTime(Date.now())}`, { color: '555555', after: 200 }));
+    kids.push(P(`${COMPANY}${writerPart()} · 방문일 ${visitDate()} · 완료 ${n.done} · 방문중 ${n.doing} · 미방문 ${n.none} (총 ${m.length}곳) · 작성 ${fmtTime(Date.now())}`, { color: '555555', after: 200 }));
     kids.push(new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun('1. 요약')] }));
     kids.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [new TableRow({ tableHeader: true, children: [cell('순서', { head: 1, w: 12 }), cell('업체', { head: 1, w: 68 }), cell('상태', { head: 1, w: 20 })] }),
       ...m.map(x => new TableRow({ children: [cell(x.c.mark), cell(x.c.name), cell(STATUS[x.st])] }))] }));
@@ -628,7 +644,7 @@
     return Packer.toBlob(doc);
   }
   function fileStamp() { const d = new Date(); return `${ymd(d).replace(/-/g, '')}_${pad(d.getHours())}${pad(d.getMinutes())}`; }
-  const baseName = () => `EXPO방문_${CFG.id === 'p1' ? '1순위' : '2순위'}_${fileStamp()}`;
+  const baseName = () => `EXPO방문_${CFG.id === 'p1' ? '대표이사방문동선' : '후순위방문동선'}_${fileStamp()}`;
   async function deliver(blob, name, how) {
     if (how === 'share') {
       const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
@@ -694,8 +710,8 @@
   function renderMore() {
     const nr = Object.values(RECS).filter(r => !r.deleted).length;
     shell('보내기 · 설정', null, `${upgradeBanner()}
-      <div class="sec"><h2>내 번호와 함께 쓰기</h2>
-        <p>${ME.no ? `이 기기는 <b>사용자 ${ME.no}</b>예요. 번호는 바뀌지 않아요.` : '아직 번호가 없어요. 인터넷에 연결되면 자동으로 정해져요(그 전에 적은 것은 임시 번호로 표시돼요).'}</p>
+      <div class="sec"><h2>내 이름과 함께 쓰기</h2>
+        <p>이 기기: <b>${esc(MYNAME || '이름 없음')}</b></p>${PEOPLE.length ? pickBtns() : ''}
         <p class="small">같은 링크를 연 사람끼리 실시간으로 함께 써요. 같은 칸을 둘이 고치면 더 나중에 고친 내용이 남고, 다른 칸은 둘 다 남아요. 인터넷이 끊겨도 이 기기에 저장되고, 다시 연결되면 자동으로 보내요.</p>
         <button class="btn sub big" id="syncnow">지금 맞추기</button><p class="small" id="syncinfo"></p></div>
       <div class="sec"><h2>업체별 정리본</h2><p class="small">녹음은 빠지고 글만 들어가요.</p>
@@ -708,6 +724,7 @@
       <div class="sec"><h2>이 기기 정리</h2><p class="small">행사가 끝난 뒤에만 쓰세요. 서버의 함께 쓴 기록은 지워지지 않아요.</p><button class="btn warn big" id="wipe">이 기기의 기록·잠금 해제 지우기</button></div>`, navBar('#more'));
     bindUpgrade();
     $('#syncinfo').textContent = NET.lastSync ? '마지막으로 맞춘 시각 ' + hhmmss(new Date(NET.lastSync)) + (NET.err ? ' · 문제: ' + NET.err : '') : (NET.err ? '문제: ' + NET.err : '');
+    bindPick(() => { renderMore(); toast('이름을 바꿨어요'); });
     $('#syncnow').onclick = async () => { await syncNow(); if (sb && NET.connected) await pullAll(); $('#syncinfo').textContent = '마지막으로 맞춘 시각 ' + hhmmss(new Date()) + (NET.err ? ' · 문제: ' + NET.err : ''); };
     const txt = () => new Blob([reportText()], { type: 'text/plain;charset=utf-8' });
     const csv = () => new Blob([csvText()], { type: 'text/csv;charset=utf-8' });
@@ -724,16 +741,23 @@
   /* ---------- 라우팅·시작 ---------- */
   function route() {
     const h = location.hash || '#list'; ROUTE = h; window.scrollTo(0, 0);
+    if (!MYNAME && PEOPLE.length) { renderPick(); return; }
     if (RS && !(h === '#c/' + RS.cid)) toast('녹음은 계속되고 있어요. 업체 화면에서 멈출 수 있어요.');
     if (h.startsWith('#c/')) renderDetail(decodeURIComponent(h.slice(3)));
     else if (h === '#report') renderReport();
     else if (h === '#more') renderMore();
     else { ROUTE = '#list'; renderList(); }
   }
+  const pickBtns = () => `<div class="btns one">${PEOPLE.map(n => `<button class="btn big ${n === MYNAME ? '' : 'sub'}" data-pick="${esc(n)}">${esc(n)}</button>`).join('')}</div>`;
+  const bindPick = after => document.querySelectorAll('[data-pick]').forEach(b => b.onclick = async () => { await pickName(b.dataset.pick); after(); });
+  function renderPick() {
+    shell(CFG.title, null, `<div class="sec"><h2>이름을 골라 주세요</h2>${pickBtns()}</div>`);
+    bindPick(() => route());
+  }
   let started = false;
   async function start() {
     if (started) return; started = true;
-    await loadLocal(); window.addEventListener('hashchange', route); route(); kick(50);
+    await loadLocal(); if (SKEY) await loadPeople(); window.addEventListener('hashchange', route); route(); kick(50);
   }
   async function boot() {
     if ('serviceWorker' in navigator) {
@@ -745,6 +769,6 @@
     try { DATA = await idbGet('kv', 'data'); } catch (_) { DATA = null; }
     if (DATA && DATA.app === CFG.id) start(); else renderLock();
   }
-  window.__expo = { syncNow, pullAll, state: () => ({ me: ME, net: Object.assign({}, NET, { connected: isConn() }), dirty: dirtyCount(), items: Object.values(ITEMS).map(x => ({ cid: x.cid, field: x.field, v: x.v, ts: x.ts, by: x.by, dirty: x.dirty })), photos: Object.values(PHOTOS).map(p => ({ id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, ts: p.ts, by: p.by, path: p.path, deleted: p.deleted, dirty: p.dirty, hasBlob: !!p.blob, size: p.blob ? p.blob.size : 0 })), recs: Object.values(RECS).map(r => ({ id: r.id, cid: r.cid, status: r.status, path: r.path, deleted: r.deleted, dirty: r.dirty, size: r.size, mime: r.mime, duration: r.duration, hasSummary: !!r.summary, hasTranscript: !!r.transcript })) }) };
+  window.__expo = { syncNow, pullAll, state: () => ({ me: ME, myname: MYNAME, people: PEOPLE.length, net: Object.assign({}, NET, { connected: isConn() }), dirty: dirtyCount(), items: Object.values(ITEMS).map(x => ({ cid: x.cid, field: x.field, v: x.v, ts: x.ts, by: x.by, dirty: x.dirty })), photos: Object.values(PHOTOS).map(p => ({ id: p.id, cid: p.cid, kind: p.kind, w: p.w, h: p.h, ts: p.ts, by: p.by, path: p.path, deleted: p.deleted, dirty: p.dirty, hasBlob: !!p.blob, size: p.blob ? p.blob.size : 0 })), recs: Object.values(RECS).map(r => ({ id: r.id, cid: r.cid, status: r.status, path: r.path, deleted: r.deleted, dirty: r.dirty, size: r.size, mime: r.mime, duration: r.duration, hasSummary: !!r.summary, hasTranscript: !!r.transcript })) }) };
   boot();
 })();

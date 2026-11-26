@@ -1,1 +1,1 @@
-{"name":"EXPO 방문 기록 — 2순위 방문 동선 (테스트)","short_name":"EXPO 2순위 테스트","start_url":"./?ns=test","scope":"./","display":"standalone","background_color":"#f3f5f8","theme_color":"#1f3a5f","lang":"ko","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml"}]}
+{"name":"EXPO 방문 기록 — 후순위 방문동선 (테스트)","short_name":"후순위 방문동선 테스트","start_url":"./?ns=test","scope":"./","display":"standalone","background_color":"#f3f5f8","theme_color":"#1f3a5f","lang":"ko","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml"}]}
